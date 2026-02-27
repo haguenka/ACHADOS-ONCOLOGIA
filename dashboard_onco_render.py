@@ -310,7 +310,8 @@ def main():
     if not os.path.exists(db_path):
         st.error(
             "Banco nao encontrado. Ajuste DB_PATH no painel da esquerda "
-            "ou configure a variavel DB_PATH no Render."
+            "ou configure a variavel DB_PATH no Render. "
+            "Voce tambem pode inicializar dados na pagina Mineracao Onco."
         )
         st.sidebar.markdown("---")
         st.sidebar.subheader("Inicializar banco")

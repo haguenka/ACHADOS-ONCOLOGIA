@@ -3,7 +3,7 @@ services:
     name: achados-onco-dashboard
     env: python
     plan: starter
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && pip install --no-cache-dir pypdf==5.2.0
     startCommand: >
       sh -c 'mkdir -p /var/data;
       if [ ! -f /var/data/tumor_findings_patients.db ]; then
