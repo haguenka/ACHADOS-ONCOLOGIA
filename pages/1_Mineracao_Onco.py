@@ -7,7 +7,6 @@ from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
-from pypdf import PdfReader
 
 
 def get_db_path():
@@ -69,7 +68,22 @@ def ensure_schema(db_path):
         conn.close()
 
 
+def get_pdf_reader_class():
+    try:
+        from pypdf import PdfReader
+        return PdfReader
+    except Exception:
+        try:
+            from PyPDF2 import PdfReader
+            return PdfReader
+        except Exception as exc:
+            raise RuntimeError(
+                "Nenhum leitor de PDF instalado. Instale pypdf ou PyPDF2 e faca redeploy."
+            ) from exc
+
+
 def extract_pdf_text(uploaded_file):
+    PdfReader = get_pdf_reader_class()
     reader = PdfReader(uploaded_file)
     chunks = []
     for page in reader.pages:
