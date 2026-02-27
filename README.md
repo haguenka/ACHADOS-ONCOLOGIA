@@ -5,12 +5,14 @@ Projeto web do dashboard do app `pdf_tumor_findings_miner.py`, adaptado para Str
 ## Arquivos
 
 - `dashboard_onco_render.py`: dashboard web
+- `pages/1_Mineracao_Onco.py`: mineracao oncologica (upload PDF -> grava no banco)
 - `requirements.txt`: dependencias Python
 - `render.yaml`: configuracao pronta para Render (Blueprint)
 
 ## Banco de dados
 
 O dashboard le a tabela `patients` do SQLite `tumor_findings_patients.db`.
+A pagina de mineracao grava na mesma tabela `patients`.
 
 Configurar caminho pelo ambiente:
 
@@ -51,3 +53,10 @@ source .venv/bin/activate
 pip install -r requirements.txt
 streamlit run dashboard_onco_render.py
 ```
+
+## Fluxo no Render (mesmo banco)
+
+1. Abra o app publicado.
+2. Va para a pagina `Mineracao Onco` (menu lateral do Streamlit).
+3. Envie os PDFs e clique em `Minerar e salvar no banco`.
+4. Volte para a pagina principal do dashboard para visualizar os dados atualizados.
