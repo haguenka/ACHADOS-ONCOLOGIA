@@ -5,7 +5,8 @@ services:
     plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: >
-      sh -c 'if [ ! -f /var/data/tumor_findings_patients.db ]; then
+      sh -c 'mkdir -p /var/data;
+      if [ ! -f /var/data/tumor_findings_patients.db ]; then
       if [ -f ./tumor_findings_patients.db ]; then cp ./tumor_findings_patients.db /var/data/tumor_findings_patients.db;
       elif [ -f ../tumor_findings_patients.db ]; then cp ../tumor_findings_patients.db /var/data/tumor_findings_patients.db; fi; fi;
       streamlit run dashboard_onco_render.py --server.address 0.0.0.0 --server.port $PORT --server.headless true'

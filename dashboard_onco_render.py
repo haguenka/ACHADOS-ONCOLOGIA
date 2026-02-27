@@ -121,6 +121,41 @@ def default_db_candidates():
     return candidates
 
 
+def save_uploaded_db(uploaded_file, db_path):
+    target = Path(db_path)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:
+        return f"Nao foi possivel criar diretorio de destino: {exc}"
+
+    tmp_path = Path(f"{db_path}.tmp")
+    try:
+        with open(tmp_path, "wb") as fp:
+            fp.write(uploaded_file.getvalue())
+    except Exception as exc:
+        return f"Falha ao gravar arquivo temporario: {exc}"
+
+    conn = None
+    try:
+        conn = sqlite3.connect(str(tmp_path))
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='patients'")
+        if cursor.fetchone() is None:
+            return "Arquivo invalido: tabela 'patients' nao encontrada."
+    except Exception as exc:
+        return f"SQLite invalido: {exc}"
+    finally:
+        if conn is not None:
+            conn.close()
+
+    try:
+        os.replace(str(tmp_path), str(target))
+    except Exception as exc:
+        return f"Falha ao mover banco para destino final: {exc}"
+
+    return None
+
+
 @st.cache_data(show_spinner=False)
 def load_patients_from_db(db_path, mtime_token):
     _ = mtime_token
@@ -277,10 +312,46 @@ def main():
             "Banco nao encontrado. Ajuste DB_PATH no painel da esquerda "
             "ou configure a variavel DB_PATH no Render."
         )
-        return
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Inicializar banco")
+        uploaded_db = st.sidebar.file_uploader(
+            "Upload do arquivo SQLite",
+            type=["db", "sqlite", "sqlite3"],
+            accept_multiple_files=False,
+        )
+        if uploaded_db is not None and st.sidebar.button("Salvar banco em DB_PATH"):
+            error = save_uploaded_db(uploaded_db, db_path)
+            if error:
+                st.sidebar.error(error)
+            else:
+                st.sidebar.success("Banco salvo com sucesso. Recarregando...")
+                st.cache_data.clear()
+                st.rerun()
+        st.stop()
 
-    mtime = os.path.getmtime(db_path)
-    raw_df = load_patients_from_db(db_path, mtime)
+    try:
+        mtime = os.path.getmtime(db_path)
+        raw_df = load_patients_from_db(db_path, mtime)
+    except Exception as exc:
+        st.error(f"Erro ao ler banco: {exc}")
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Substituir banco")
+        uploaded_db = st.sidebar.file_uploader(
+            "Upload do arquivo SQLite",
+            type=["db", "sqlite", "sqlite3"],
+            accept_multiple_files=False,
+            key="replace_db",
+        )
+        if uploaded_db is not None and st.sidebar.button("Substituir banco em DB_PATH"):
+            error = save_uploaded_db(uploaded_db, db_path)
+            if error:
+                st.sidebar.error(error)
+            else:
+                st.sidebar.success("Banco substituido. Recarregando...")
+                st.cache_data.clear()
+                st.rerun()
+        st.stop()
+
     df = build_dataframe(raw_df)
 
     data_df = df[df["eligible_bool"]] if only_eligible else df
