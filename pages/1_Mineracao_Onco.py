@@ -818,7 +818,7 @@ def render_clickable_patient_table(df, table_cols, table_key):
     nonce_key = f"{table_key}_nonce"
     nonce = int(st.session_state.get(nonce_key, 0))
     event = st.dataframe(
-        style_patient_table(view_df),
+        view_df,
         use_container_width=True,
         height=620,
         hide_index=True,
@@ -881,6 +881,41 @@ def render_pending_open_button(display_df):
     if cols[2].button("Limpar selecao", key=f"clear_pending_{same_id}"):
         st.session_state["pending_same_id"] = ""
         st.rerun()
+
+
+def render_analysis_tab_open_selector(display_df):
+    if display_df.empty:
+        return
+
+    st.markdown("---")
+    st.caption("Abertura direta da analise detalhada")
+
+    option_labels = []
+    same_by_label = {}
+    for _, row in display_df.head(1000).iterrows():
+        same = normalize_text(row.get("SAME"))
+        nome = normalize_text(row.get("NOME"))
+        esp = normalize_text(row.get("ESPECIALIDADE"))
+        label = f"{nome} | SAME {same} | {esp}"
+        option_labels.append(label)
+        same_by_label[label] = normalize_text(row.get("same_id"))
+
+    if not option_labels:
+        return
+
+    selected_label = st.selectbox(
+        "Selecionar paciente",
+        option_labels,
+        key="analysis_tab_patient_select",
+    )
+    selected_same = same_by_label.get(selected_label, "")
+
+    cols = st.columns([1, 1, 4])
+    if cols[0].button("Abrir analise detalhada", key="analysis_tab_open_btn"):
+        if selected_same:
+            st.session_state["detail_same_id"] = selected_same
+            st.session_state["open_detail_dialog"] = True
+            st.rerun()
 
 
 @st.dialog("Analise Detalhada do Paciente")
@@ -1186,6 +1221,8 @@ def main():
         else:
             st.dataframe(display_df[["SAME", "NOME", "ESPECIALIDADE", "MODELO IA", "URGENCIA"]], use_container_width=True, hide_index=True)
             st.caption("Coluna MODELO IA comprova qual modelo executou a mineracao.")
+            render_analysis_tab_open_selector(display_df)
+            render_pending_detail_dialog(display_df)
 
 
 if __name__ == "__main__":
