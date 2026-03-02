@@ -2,6 +2,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -553,6 +554,14 @@ def load_patients_from_db(db_path, mtime_token):
                 urgency_level,
                 ai_model,
                 is_eligible,
+                ai_analysis,
+                full_text,
+                tumor_findings,
+                tumor_location,
+                tumor_characteristics,
+                urgency_reason,
+                last_file,
+                context,
                 updated_at
             FROM patients
             ORDER BY updated_at DESC
@@ -604,6 +613,16 @@ def build_results_dataframe(df, only_eligible):
         "MODALIDADE",
         "ESPECIALIDADE",
         "MODELO IA",
+        "same_id",
+        "ai_analysis",
+        "full_text",
+        "tumor_findings",
+        "tumor_location",
+        "tumor_characteristics",
+        "urgency_reason",
+        "last_file",
+        "context",
+        "updated_at",
     ]
     return work[cols]
 
@@ -631,12 +650,149 @@ def render_specialty_tabs(df):
     tabs = st.tabs(labels)
 
     with tabs[0]:
-        st.dataframe(style_patient_table(df[table_cols]), use_container_width=True, height=620, hide_index=True)
+        render_clickable_patient_table(df, table_cols, "tab_all")
 
     for idx, (name, _count) in enumerate(specialty_counts.items(), start=1):
         with tabs[idx]:
-            filtered = df[df["ESPECIALIDADE"] == name][table_cols]
-            st.dataframe(style_patient_table(filtered), use_container_width=True, height=620, hide_index=True)
+            filtered = df[df["ESPECIALIDADE"] == name].copy()
+            render_clickable_patient_table(filtered, table_cols, f"tab_{idx}_{ascii_fold(name)}")
+
+
+def extract_selected_rows(event):
+    if event is None:
+        return []
+    try:
+        rows = event.selection.rows
+        if isinstance(rows, list):
+            return rows
+    except Exception:
+        pass
+
+    if isinstance(event, dict):
+        selection = event.get("selection", {})
+        rows = selection.get("rows", [])
+        if isinstance(rows, list):
+            return rows
+
+    return []
+
+
+def register_double_click(table_key, row_idx, threshold=0.8):
+    now = time.time()
+    signature = f"{table_key}:{row_idx}"
+    last_signature = st.session_state.get("last_click_signature")
+    last_ts = st.session_state.get("last_click_ts", 0.0)
+
+    st.session_state["last_click_signature"] = signature
+    st.session_state["last_click_ts"] = now
+
+    return signature == last_signature and (now - last_ts) <= threshold
+
+
+def render_clickable_patient_table(df, table_cols, table_key):
+    if df.empty:
+        st.info("Sem pacientes nesta aba.")
+        return
+
+    view_df = df[table_cols].copy()
+    event = st.dataframe(
+        style_patient_table(view_df),
+        use_container_width=True,
+        height=620,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"{table_key}_grid",
+    )
+
+    selected_rows = extract_selected_rows(event)
+    if not selected_rows:
+        return
+
+    row_idx = selected_rows[0]
+    selected_row = None
+    if isinstance(row_idx, int) and 0 <= row_idx < len(df):
+        selected_row = df.iloc[row_idx]
+    elif row_idx in df.index:
+        selected_row = df.loc[row_idx]
+    else:
+        return
+
+    if register_double_click(table_key, row_idx):
+        same_id = normalize_text(selected_row["same_id"])
+        if same_id:
+            st.session_state["detail_same_id"] = same_id
+            st.session_state["open_detail_dialog"] = True
+
+
+@st.dialog("Analise Detalhada do Paciente")
+def show_patient_detail_dialog(row):
+    patient_name = normalize_text(row.get("NOME")) or "Paciente"
+    urgency = normalize_urgency(row.get("URGENCIA"))
+    score_txt = normalize_text(row.get("SCORE MALIG."))
+
+    st.subheader(patient_name)
+    meta_cols = st.columns([2, 1, 1, 1])
+    meta_cols[0].markdown(
+        f"**SAME:** {normalize_text(row.get('SAME'))}  \n"
+        f"**Idade:** {normalize_text(row.get('IDADE'))}  \n"
+        f"**Data:** {normalize_text(row.get('DATA EXAME'))}"
+    )
+    meta_cols[1].metric("Urgencia", urgency)
+    meta_cols[2].metric("Malignidade", score_txt)
+    meta_cols[3].metric("Modalidade", normalize_text(row.get("MODALIDADE")))
+
+    tab_ai, tab_full, tab_details = st.tabs(["Analise IA", "Texto Completo", "Detalhes"])
+
+    with tab_ai:
+        st.text_area(
+            "Analise gerada pela IA",
+            value=normalize_text(row.get("ai_analysis")) or "Sem analise IA salva.",
+            height=360,
+            disabled=True,
+            key=f"ai_detail_{normalize_text(row.get('same_id'))}",
+        )
+
+    with tab_full:
+        st.text_area(
+            "Texto completo do laudo",
+            value=normalize_text(row.get("full_text")) or "Sem texto completo salvo.",
+            height=360,
+            disabled=True,
+            key=f"full_detail_{normalize_text(row.get('same_id'))}",
+        )
+
+    with tab_details:
+        details_df = pd.DataFrame(
+            [
+                {"Campo": "Especialidade", "Valor": normalize_text(row.get("ESPECIALIDADE"))},
+                {"Campo": "Modelo IA", "Valor": normalize_text(row.get("MODELO IA"))},
+                {"Campo": "Achados", "Valor": normalize_text(row.get("tumor_findings"))},
+                {"Campo": "Localizacao", "Valor": normalize_text(row.get("tumor_location"))},
+                {"Campo": "Caracteristicas", "Valor": normalize_text(row.get("tumor_characteristics"))},
+                {"Campo": "Motivo urgencia", "Valor": normalize_text(row.get("urgency_reason"))},
+                {"Campo": "Arquivo", "Valor": normalize_text(row.get("last_file"))},
+                {"Campo": "Atualizado em", "Valor": normalize_text(row.get("updated_at"))},
+            ]
+        )
+        st.dataframe(details_df, use_container_width=True, hide_index=True)
+
+
+def render_pending_detail_dialog(display_df):
+    if not st.session_state.get("open_detail_dialog"):
+        return
+
+    same_id = normalize_text(st.session_state.get("detail_same_id"))
+    st.session_state["open_detail_dialog"] = False
+    if not same_id:
+        return
+
+    matched = display_df[display_df["same_id"].astype(str) == same_id]
+    if matched.empty:
+        return
+
+    row = matched.iloc[0].to_dict()
+    show_patient_detail_dialog(row)
 
 
 def render_css():
@@ -828,6 +984,7 @@ def main():
 
     with tab_detalhado:
         render_specialty_tabs(display_df)
+        render_pending_detail_dialog(display_df)
 
     with tab_analise:
         if display_df.empty:
