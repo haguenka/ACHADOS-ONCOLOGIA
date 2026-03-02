@@ -70,6 +70,27 @@ def set_cached_models(provider, models):
         st.session_state["models_by_provider"][provider] = unique_models or list(MODEL_OPTIONS.get(provider, []))
 
 
+def specialty_chip(name):
+    key = ascii_fold(name).lower()
+    if "onco" in key:
+        return "🔴"
+    if "pneumo" in key:
+        return "🟠"
+    if "uro" in key:
+        return "🟢"
+    if "gineco" in key or "obst" in key:
+        return "🟣"
+    if "mama" in key:
+        return "🌸"
+    if "gastro" in key:
+        return "🔵"
+    if "orto" in key:
+        return "🟤"
+    if "otorrino" in key:
+        return "🟡"
+    return "⚪"
+
+
 def normalize_text(value):
     if value is None:
         return ""
@@ -770,7 +791,8 @@ def render_specialty_tabs(df):
 
     table_cols = ["URGENCIA", "SCORE MALIG.", "SAME", "NOME", "IDADE", "DATA EXAME", "MODALIDADE"]
     specialty_counts = df["ESPECIALIDADE"].value_counts()
-    labels = [f"Todos ({len(df)})"] + [f"{name} ({count})" for name, count in specialty_counts.items()]
+    labels = ["⚪ Todos ({})".format(len(df))]
+    labels.extend([f"{specialty_chip(name)} {name} ({count})" for name, count in specialty_counts.items()])
     tabs = st.tabs(labels)
 
     with tabs[0]:
@@ -810,7 +832,7 @@ def render_clickable_patient_table(df, table_cols, table_key):
     selected_same = open_same_by_label.get(selected_label, "")
     st.session_state[f"{table_key}_selected_same"] = selected_same
 
-    if cols[1].button("Abrir analise detalhada", key=f"{table_key}_open_btn"):
+    if cols[1].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
         same_id = selected_same
         if same_id:
             st.session_state["detail_same_id"] = same_id
@@ -969,7 +991,7 @@ def show_patient_detail_dialog(row):
         st.text_area(
             "Bloco original da IA",
             value=normalize_text(row.get("ai_analysis")) or "Sem analise IA salva.",
-            height=190,
+            height=150,
             disabled=True,
             key=f"ai_detail_raw_{normalize_text(row.get('same_id'))}",
         )
@@ -1038,6 +1060,35 @@ def render_css():
             font-size: 14px;
             margin-bottom: 6px;
         }
+        [data-testid="stDialog"] > div[role="dialog"] {
+            width: min(96vw, 1500px) !important;
+            max-width: min(96vw, 1500px) !important;
+        }
+        [data-baseweb="tab-list"] {
+            gap: 6px;
+            flex-wrap: wrap;
+        }
+        [data-baseweb="tab-list"] button {
+            border: 1px solid #3d4652 !important;
+            border-radius: 8px 8px 0 0 !important;
+            background: #1c2430 !important;
+            color: #cdd7e1 !important;
+            padding: 6px 10px !important;
+        }
+        [data-baseweb="tab-list"] button[aria-selected="true"] {
+            border-color: #228be6 !important;
+            background: #0b2e57 !important;
+            color: #f1f3f5 !important;
+        }
+        .stButton > button[kind="primary"] {
+            background: linear-gradient(180deg, #d90429, #9d0208) !important;
+            border: 1px solid #ff4d6d !important;
+            color: #fff5f5 !important;
+            font-weight: 700 !important;
+        }
+        .stButton > button[kind="primary"]:hover {
+            background: linear-gradient(180deg, #ef233c, #c1121f) !important;
+        }
         .detail-header-block {
             background: linear-gradient(180deg, #27241f, #221f1a);
             border: 1px solid #3a332b;
@@ -1046,11 +1097,12 @@ def render_css():
             margin-bottom: 8px;
         }
         .detail-patient-name {
-            font-size: 44px;
+            font-size: clamp(34px, 3.6vw, 52px);
             font-weight: 900;
             color: #f1f3f5;
             line-height: 1.05;
             margin-bottom: 8px;
+            word-break: break-word;
         }
         .detail-patient-meta {
             display: flex;
@@ -1080,13 +1132,13 @@ def render_css():
             margin-bottom: 3px;
         }
         .detail-side-value {
-            font-size: 28px;
+            font-size: clamp(22px, 2.3vw, 34px);
             font-weight: 900;
             color: #ffe066;
             line-height: 1.05;
         }
         .detail-side-stars {
-            font-size: 22px;
+            font-size: clamp(16px, 1.6vw, 26px);
             letter-spacing: 1px;
             color: #ff6b6b;
             margin: 2px 0;
@@ -1097,9 +1149,11 @@ def render_css():
             border-radius: 10px;
             padding: 14px;
             margin-bottom: 10px;
+            max-height: 50vh;
+            overflow-y: auto;
         }
         .detail-panel-title {
-            font-size: 34px;
+            font-size: clamp(28px, 3vw, 42px);
             font-weight: 900;
             color: #f1f3f5;
             margin-bottom: 10px;
@@ -1112,7 +1166,7 @@ def render_css():
             margin-bottom: 9px;
         }
         .detail-section-title {
-            font-size: 26px;
+            font-size: clamp(20px, 2.1vw, 30px);
             font-weight: 900;
             margin-bottom: 6px;
             color: #4dabf7;
@@ -1120,7 +1174,7 @@ def render_css():
         }
         .detail-line, .detail-content {
             color: #dee2e6;
-            font-size: 20px;
+            font-size: clamp(17px, 1.5vw, 24px);
             line-height: 1.35;
             margin-bottom: 2px;
         }
@@ -1222,7 +1276,7 @@ def main():
         accept_multiple_files=True,
         label_visibility="collapsed",
     )
-    start_clicked = control_cols[1].button("Iniciar Processamento", type="primary", use_container_width=True)
+    start_clicked = control_cols[1].button("Iniciar Processamento", use_container_width=True)
     test_clicked = control_cols[2].button("Testar IA", use_container_width=True)
     clear_clicked = control_cols[3].button("Limpar Cache", use_container_width=True)
 
