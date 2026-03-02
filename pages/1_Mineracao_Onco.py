@@ -1,12 +1,56 @@
+import json
 import os
 import re
 import sqlite3
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pandas as pd
+import requests
 import streamlit as st
+
+
+MODEL_OPTIONS = {
+    "OpenAI": ["gpt-4o-mini", "gpt-4.1-mini", "gpt-5-mini"],
+    "DeepSeek": ["deepseek-chat", "deepseek-reasoner"],
+    "Gemini": ["gemini-2.5-flash", "gemini-2.5-pro"],
+    "LLM Studio": ["local-model"],
+}
+
+PROVIDER_ENV_KEYS = {
+    "OpenAI": "OPENAI_API_KEY",
+    "DeepSeek": "DEEPSEEK_API_KEY",
+    "Gemini": "GEMINI_API_KEY",
+    "LLM Studio": "",
+}
+
+PROVIDER_BASE_URLS = {
+    "OpenAI": "https://api.openai.com/v1",
+    "DeepSeek": "https://api.deepseek.com",
+    "LLM Studio": os.getenv("LLM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
+}
+
+URGENCY_ORDER = ["CRITICA", "MUITO ALTA", "ALTA", "MODERADA", "BAIXA"]
+ROW_BG_BY_URGENCY = {
+    "CRITICA": "#4a1a1a",
+    "MUITO ALTA": "#5a320f",
+    "ALTA": "#5a510f",
+    "MODERADA": "#163a59",
+    "BAIXA": "#143d31",
+}
+
+
+def normalize_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def ascii_fold(value):
+    text = normalize_text(value)
+    return "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
 
 
 def get_db_path():
@@ -71,10 +115,12 @@ def ensure_schema(db_path):
 def get_pdf_reader_class():
     try:
         from pypdf import PdfReader
+
         return PdfReader
     except Exception:
         try:
             from PyPDF2 import PdfReader
+
             return PdfReader
         except Exception as exc:
             raise RuntimeError(
@@ -92,7 +138,7 @@ def extract_pdf_text(uploaded_file):
     return "\n".join(chunks).strip()
 
 
-def parse_same_id(text):
+def parse_same_id_fallback(text):
     patterns = [
         r"\bSAME\s*[:\-]?\s*([A-Z0-9]{4,})",
         r"\bID\s*PACIENTE\s*[:\-]?\s*([A-Z0-9]{4,})",
@@ -105,7 +151,7 @@ def parse_same_id(text):
     return f"AUTO-{uuid4().hex[:12].upper()}"
 
 
-def parse_patient_name(text):
+def parse_patient_name_fallback(text):
     patterns = [
         r"PACIENTE\s*[:\-]\s*([A-ZA-Z\s]{6,})",
         r"NOME\s*[:\-]\s*([A-ZA-Z\s]{6,})",
@@ -119,116 +165,266 @@ def parse_patient_name(text):
     return "Paciente nao identificado"
 
 
-def parse_exam_date(text):
+def parse_exam_date_fallback(text):
     match = re.search(r"\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b", text)
     return match.group(1) if match else datetime.utcnow().strftime("%d/%m/%Y")
 
 
-def infer_modality(text_upper):
-    if "RESSON" in text_upper or re.search(r"\bRM\b", text_upper):
-        return "RESSONANCIA MAGNETICA"
-    if "TOMOGRAF" in text_upper or re.search(r"\bTC\b", text_upper):
-        return "TOMOGRAFIA COMPUTADORIZADA"
-    if "PET" in text_upper:
-        return "PET-CT"
-    if "MAMOGRAF" in text_upper:
+def parse_age_fallback(text):
+    match = re.search(r"\b(\d{1,3})\s*ANOS\b", ascii_fold(text).upper())
+    if match:
+        return match.group(1)
+    return ""
+
+
+def infer_modality_fallback(text):
+    upper = ascii_fold(text).upper()
+    if "RESSON" in upper or re.search(r"\bRM\b", upper):
+        return "RM"
+    if "TOMOGRAF" in upper or re.search(r"\bTC\b", upper):
+        return "TC"
+    if "PET" in upper:
+        return "PET"
+    if "MAMOGRAF" in upper:
         return "MAMOGRAFIA"
     return "RADIOLOGIA"
 
 
-def infer_specialty(text_upper):
-    if any(t in text_upper for t in ["MAMA", "MAMARIO", "BIRADS"]):
-        return "ONCOLOGIA MAMARIA"
-    if any(t in text_upper for t in ["PULMAO", "TORAX", "NODULO PULMONAR"]):
-        return "ONCOLOGIA TORACICA"
-    if any(t in text_upper for t in ["FIGADO", "HEPATIC", "LIRADS"]):
-        return "ONCOLOGIA ABDOMINAL"
-    if any(t in text_upper for t in ["PROSTATA", "PIRADS"]):
-        return "ONCOLOGIA UROLOGICA"
-    if any(t in text_upper for t in ["CEREBRO", "ENCEFALO", "CRANIO"]):
-        return "NEURO-ONCOLOGIA"
-    return "ONCOLOGIA RADIOLOGICA"
+def infer_specialty_fallback(text):
+    upper = ascii_fold(text).upper()
+    if any(t in upper for t in ["MAMA", "MAMARIO", "BIRADS"]):
+        return "Oncologia"
+    if any(t in upper for t in ["PULMAO", "TORAX", "NODULO PULMONAR"]):
+        return "Pneumologia"
+    if any(t in upper for t in ["PROSTATA", "PIRADS", "RIM", "RENAL"]):
+        return "Urologia"
+    if any(t in upper for t in ["UTERO", "OVARIO", "GINECO", "PELV"]):
+        return "Ginecologia"
+    if any(t in upper for t in ["FIGADO", "HEPAT", "PANCREAS", "ABDOMEN"]):
+        return "Gastroenterologia"
+    if any(t in upper for t in ["OSSO", "ORTOP", "MUSCULO"]):
+        return "Ortopedia"
+    return "Outro"
 
 
-def infer_location(text_upper):
-    locations = [
-        ("PULMAO", "pulmao"),
-        ("MAMA", "mama"),
-        ("FIGADO", "figado"),
-        ("PROSTATA", "prostata"),
-        ("RIM", "rim"),
-        ("PANCREAS", "pancreas"),
-        ("CEREBRO", "cerebro"),
-        ("OSSO", "osso"),
-    ]
-    found = [label for token, label in locations if token in text_upper]
-    return ", ".join(found) if found else "nao especificado"
+def normalize_urgency(value):
+    text = ascii_fold(value).upper()
+    alias = {
+        "CRITICA": "CRITICA",
+        "MUITO ALTA": "MUITO ALTA",
+        "ALTA": "ALTA",
+        "MODERADA": "MODERADA",
+        "BAIXA": "BAIXA",
+    }
+    return alias.get(text, "MODERADA")
 
 
-def evaluate_oncology_risk(text):
-    text_upper = text.upper()
-    weighted_terms = {
-        "METASTASE": 4,
-        "METASTATICO": 4,
-        "CARCINOMA": 4,
-        "ADENOCARCINOMA": 4,
-        "LINFOMA": 4,
-        "NEOPLASIA": 3,
-        "MALIGN": 3,
-        "NODULO": 2,
-        "MASSA": 2,
-        "LESAO": 2,
-        "BIRADS 4": 2,
-        "BIRADS 5": 3,
-        "PIRADS 4": 2,
-        "PIRADS 5": 3,
-        "LIRADS 4": 2,
-        "LIRADS 5": 3,
-        "BIOPSIA": 1,
+def normalize_score(value):
+    try:
+        score = int(float(value))
+    except Exception:
+        score = 0
+    return max(0, min(5, score))
+
+
+def normalize_bool(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return int(value) == 1
+    text = ascii_fold(value).lower()
+    return text in {"1", "true", "sim", "yes", "y"}
+
+
+def extract_json_block(text):
+    if not text:
+        return None
+    cleaned = text.strip()
+
+    try:
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", cleaned, flags=re.IGNORECASE)
+    if fenced:
+        try:
+            parsed = json.loads(fenced.group(1).strip())
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            parsed = json.loads(cleaned[start : end + 1])
+            if isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
+
+    return None
+
+
+def ai_system_prompt():
+    return (
+        "Voce e um especialista em radiologia oncologica. "
+        "Extraia dados do laudo e responda EXCLUSIVAMENTE em JSON valido, sem markdown. "
+        "Campos obrigatorios: same_id, patient_name, age, last_exam_date, exam_modality, "
+        "medical_specialty, tumor_findings, tumor_location, tumor_characteristics, "
+        "malignancy_score, urgency_level, urgency_reason, is_eligible. "
+        "Regras: malignancy_score deve ser inteiro 0-5; urgency_level deve ser CRITICA, MUITO ALTA, ALTA, MODERADA ou BAIXA; "
+        "is_eligible deve ser booleano. Se dado ausente, use string vazia."
+    )
+
+
+def call_openai_compatible(base_url, api_key, model, report_text):
+    endpoint = base_url.rstrip("/") + "/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "model": model,
+        "temperature": 0.1,
+        "messages": [
+            {"role": "system", "content": ai_system_prompt()},
+            {
+                "role": "user",
+                "content": (
+                    "Analise o laudo abaixo e retorne apenas JSON.\n\n"
+                    + report_text[:120000]
+                ),
+            },
+        ],
+        "response_format": {"type": "json_object"},
     }
 
-    found_terms = []
-    total_weight = 0
-    for term, weight in weighted_terms.items():
-        if term in text_upper:
-            found_terms.append(term)
-            total_weight += weight
+    response = requests.post(endpoint, headers=headers, json=payload, timeout=150)
+    if response.status_code >= 400:
+        payload.pop("response_format", None)
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=150)
 
-    if total_weight >= 9:
-        score = 5
-        urgency = "CRITICA"
-    elif total_weight >= 6:
-        score = 4
-        urgency = "MUITO ALTA"
-    elif total_weight >= 4:
-        score = 3
-        urgency = "ALTA"
-    elif total_weight >= 2:
-        score = 2
-        urgency = "MODERADA"
-    elif total_weight >= 1:
-        score = 1
-        urgency = "BAIXA"
-    else:
-        score = 0
-        urgency = "BAIXA"
+    if response.status_code >= 400:
+        raise RuntimeError(f"Falha na API ({response.status_code}): {response.text[:500]}")
 
-    eligible = score >= 2
-    reason = ", ".join(found_terms[:8]) if found_terms else "sem termos oncologicos relevantes"
-    return score, urgency, eligible, reason, found_terms
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
 
 
-def build_analysis_text(modality, specialty, score, urgency, reason):
-    conclusion = "ELEGIVEL" if score >= 2 else "NAO ELEGIVEL"
+def call_gemini(api_key, model, report_text):
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY nao informado.")
+
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        f"?key={api_key}"
+    )
+    prompt = (
+        ai_system_prompt()
+        + "\n\nLAUDO:\n"
+        + report_text[:120000]
+        + "\n\nRetorne apenas JSON valido."
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.1},
+    }
+
+    response = requests.post(endpoint, json=payload, timeout=150)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Falha na API Gemini ({response.status_code}): {response.text[:500]}")
+
+    data = response.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        raise RuntimeError("Gemini retornou sem candidates.")
+
+    parts = candidates[0].get("content", {}).get("parts", [])
+    text_parts = [normalize_text(part.get("text", "")) for part in parts if isinstance(part, dict)]
+    raw = "\n".join([t for t in text_parts if t])
+    if not raw:
+        raise RuntimeError("Gemini retornou resposta vazia.")
+    return raw
+
+
+def call_ai(provider, model, api_key, report_text):
+    if provider == "Gemini":
+        return call_gemini(api_key, model, report_text)
+
+    if provider in ("OpenAI", "DeepSeek", "LLM Studio"):
+        base_url = PROVIDER_BASE_URLS[provider]
+        return call_openai_compatible(base_url, api_key, model, report_text)
+
+    raise RuntimeError(f"Provider nao suportado: {provider}")
+
+
+def build_ai_analysis_from_payload(payload):
+    conclusion = "ELEGIVEL" if payload["is_eligible"] else "NAO ELEGIVEL"
     return (
-        f"**MODALIDADE DO EXAME**: {modality}\n"
-        f"**ESPECIALIDADE MEDICA**: {specialty}\n"
-        f"**ACHADOS**: Mineracao automatica por regras.\n"
-        f"**ESCORE DE MALIGNIDADE**: {score}\n"
-        f"URGENCIA: {urgency}\n"
-        f"MOTIVO DA URGENCIA: {reason}\n"
+        f"**MODALIDADE DO EXAME**: {payload['exam_modality']}\n"
+        f"**ESPECIALIDADE MEDICA**: {payload['medical_specialty']}\n"
+        f"**ACHADOS**: {payload['tumor_findings']}\n"
+        f"**ESCORE DE MALIGNIDADE**: {payload['malignancy_score']}\n"
+        f"URGENCIA: {payload['urgency_level']}\n"
+        f"MOTIVO DA URGENCIA: {payload['urgency_reason']}\n"
         f"CONCLUSAO: {conclusion}"
     )
+
+
+def normalize_ai_payload(ai_dict, source_text, file_name, provider, model):
+    same_id = normalize_text(ai_dict.get("same_id")) or parse_same_id_fallback(source_text)
+    patient_name = normalize_text(ai_dict.get("patient_name")) or parse_patient_name_fallback(source_text)
+    age = normalize_text(ai_dict.get("age")) or parse_age_fallback(source_text)
+    last_exam_date = normalize_text(ai_dict.get("last_exam_date")) or parse_exam_date_fallback(source_text)
+    exam_modality = normalize_text(ai_dict.get("exam_modality")) or infer_modality_fallback(source_text)
+    medical_specialty = normalize_text(ai_dict.get("medical_specialty")) or infer_specialty_fallback(source_text)
+    tumor_findings = normalize_text(ai_dict.get("tumor_findings"))
+    tumor_location = normalize_text(ai_dict.get("tumor_location"))
+    tumor_characteristics = normalize_text(ai_dict.get("tumor_characteristics"))
+    malignancy_score = normalize_score(ai_dict.get("malignancy_score"))
+    urgency_level = normalize_urgency(ai_dict.get("urgency_level"))
+    urgency_reason = normalize_text(ai_dict.get("urgency_reason"))
+
+    is_eligible = normalize_bool(ai_dict.get("is_eligible"))
+    if "is_eligible" not in ai_dict:
+        is_eligible = malignancy_score >= 2
+
+    payload = {
+        "same_id": same_id,
+        "patient_name": patient_name,
+        "age": age,
+        "last_exam_date": last_exam_date,
+        "last_file": file_name,
+        "context": json.dumps(
+            {
+                "source": "streamlit_mineracao_onco_ai",
+                "provider": provider,
+                "model": model,
+                "processed_at": datetime.utcnow().isoformat(),
+            },
+            ensure_ascii=True,
+        ),
+        "full_text": source_text[:250000],
+        "ai_analysis": "",
+        "ai_model": f"{provider}:{model}",
+        "is_eligible": 1 if is_eligible else 0,
+        "exam_title": file_name,
+        "exam_modality": exam_modality,
+        "medical_specialty": medical_specialty,
+        "tumor_findings": tumor_findings,
+        "tumor_location": tumor_location,
+        "tumor_characteristics": tumor_characteristics,
+        "malignancy_score": malignancy_score,
+        "urgency_level": urgency_level,
+        "urgency_reason": urgency_reason,
+    }
+    payload["ai_analysis"] = build_ai_analysis_from_payload(payload)
+    return payload
 
 
 def upsert_patient(db_path, data):
@@ -238,14 +434,15 @@ def upsert_patient(db_path, data):
         cursor.execute(
             """
             INSERT INTO patients (
-                same_id, patient_name, last_exam_date, last_file, context,
+                same_id, patient_name, age, last_exam_date, last_file, context,
                 full_text, ai_analysis, ai_model, is_eligible, exam_title,
                 exam_modality, medical_specialty, tumor_findings, tumor_location,
                 tumor_characteristics, malignancy_score, urgency_level, urgency_reason
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(same_id) DO UPDATE SET
                 patient_name = excluded.patient_name,
+                age = excluded.age,
                 last_exam_date = excluded.last_exam_date,
                 last_file = excluded.last_file,
                 context = excluded.context,
@@ -267,6 +464,7 @@ def upsert_patient(db_path, data):
             (
                 data["same_id"],
                 data["patient_name"],
+                data["age"],
                 data["last_exam_date"],
                 data["last_file"],
                 data["context"],
@@ -290,107 +488,353 @@ def upsert_patient(db_path, data):
         conn.close()
 
 
-def process_pdf(uploaded_file, db_path):
-    text = extract_pdf_text(uploaded_file)
-    if not text:
-        raise ValueError("PDF sem texto extraivel.")
+def process_pdf_with_ai(uploaded_file, db_path, provider, model, api_key):
+    report_text = extract_pdf_text(uploaded_file)
+    if not report_text:
+        raise RuntimeError("PDF sem texto extraivel.")
 
-    text_upper = text.upper()
-    same_id = parse_same_id(text)
-    patient_name = parse_patient_name(text)
-    exam_date = parse_exam_date(text)
-    modality = infer_modality(text_upper)
-    specialty = infer_specialty(text_upper)
-    location = infer_location(text_upper)
-    score, urgency, eligible, reason, terms = evaluate_oncology_risk(text)
+    raw_ai = call_ai(provider, model, api_key, report_text)
+    ai_dict = extract_json_block(raw_ai)
+    if not isinstance(ai_dict, dict):
+        raise RuntimeError(f"IA retornou formato invalido: {raw_ai[:500]}")
 
-    ai_analysis = build_analysis_text(modality, specialty, score, urgency, reason)
-    tumor_findings = ", ".join(terms[:10]) if terms else "sem achados relevantes"
-
-    payload = {
-        "same_id": same_id,
-        "patient_name": patient_name,
-        "last_exam_date": exam_date,
-        "last_file": uploaded_file.name,
-        "context": '{"source":"streamlit_mineracao_onco"}',
-        "full_text": text[:250000],
-        "ai_analysis": ai_analysis,
-        "ai_model": "RULES_MINER_RENDER_V1",
-        "is_eligible": 1 if eligible else 0,
-        "exam_title": uploaded_file.name,
-        "exam_modality": modality,
-        "medical_specialty": specialty,
-        "tumor_findings": tumor_findings,
-        "tumor_location": location,
-        "tumor_characteristics": reason,
-        "malignancy_score": score,
-        "urgency_level": urgency,
-        "urgency_reason": reason,
-    }
+    payload = normalize_ai_payload(ai_dict, report_text, uploaded_file.name, provider, model)
     upsert_patient(db_path, payload)
 
     return {
-        "arquivo": uploaded_file.name,
-        "same_id": same_id,
-        "paciente": patient_name,
-        "modalidade": modality,
-        "especialidade": specialty,
-        "score": score,
-        "urgencia": urgency,
-        "elegivel": "sim" if eligible else "nao",
-        "achados": tumor_findings,
+        "urgencia": payload["urgency_level"],
+        "score": f"{payload['malignancy_score']}/5",
+        "same": payload["same_id"],
+        "nome": payload["patient_name"],
+        "idade": payload["age"],
+        "data_exame": payload["last_exam_date"],
+        "modalidade": payload["exam_modality"],
+        "especialidade": payload["medical_specialty"],
+        "modelo_ia": payload["ai_model"],
+        "elegivel": "sim" if payload["is_eligible"] else "nao",
     }
 
 
-def main():
-    st.title("Mineracao Oncologica")
-    st.caption("Upload de PDFs e gravacao na mesma base usada pelo dashboard.")
+def save_uploaded_db(uploaded_file, db_path):
+    target = Path(db_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = Path(f"{db_path}.tmp")
+    with open(tmp_path, "wb") as fp:
+        fp.write(uploaded_file.getvalue())
 
-    db_path = st.sidebar.text_input("DB_PATH (SQLite)", value=get_db_path())
-    uploaded_files = st.file_uploader(
-        "Selecione PDFs para minerar",
-        type=["pdf"],
-        accept_multiple_files=True,
+    conn = None
+    try:
+        conn = sqlite3.connect(str(tmp_path))
+        cursor = conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='patients'")
+        if cursor.fetchone() is None:
+            raise RuntimeError("Arquivo invalido: tabela 'patients' nao encontrada.")
+    finally:
+        if conn is not None:
+            conn.close()
+
+    os.replace(str(tmp_path), str(target))
+
+
+@st.cache_data(show_spinner=False)
+def load_patients_from_db(db_path, mtime_token):
+    _ = mtime_token
+    conn = sqlite3.connect(db_path)
+    try:
+        query = """
+            SELECT
+                same_id,
+                patient_name,
+                age,
+                last_exam_date,
+                exam_modality,
+                medical_specialty,
+                malignancy_score,
+                urgency_level,
+                ai_model,
+                is_eligible,
+                updated_at
+            FROM patients
+            ORDER BY updated_at DESC
+        """
+        return pd.read_sql_query(query, conn)
+    finally:
+        conn.close()
+
+
+def build_results_dataframe(df, only_eligible):
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "URGENCIA",
+                "SCORE MALIG.",
+                "SAME",
+                "NOME",
+                "IDADE",
+                "DATA EXAME",
+                "MODALIDADE",
+                "ESPECIALIDADE",
+                "MODELO IA",
+            ]
+        )
+
+    work = df.copy()
+    work["is_eligible"] = work["is_eligible"].apply(normalize_bool)
+    if only_eligible:
+        work = work[work["is_eligible"]].copy()
+
+    work["URGENCIA"] = work["urgency_level"].apply(normalize_urgency)
+    work["SCORE_NUM"] = work["malignancy_score"].apply(normalize_score)
+    work["SCORE MALIG."] = work["SCORE_NUM"].apply(lambda x: f"{x}/5")
+    work["SAME"] = work["same_id"].fillna("").astype(str)
+    work["NOME"] = work["patient_name"].fillna("").astype(str)
+    work["IDADE"] = work["age"].fillna("").astype(str)
+    work["DATA EXAME"] = work["last_exam_date"].fillna("").astype(str)
+    work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
+    work["ESPECIALIDADE"] = work["medical_specialty"].fillna("Outro").astype(str)
+    work["MODELO IA"] = work["ai_model"].fillna("").astype(str)
+
+    cols = [
+        "URGENCIA",
+        "SCORE MALIG.",
+        "SAME",
+        "NOME",
+        "IDADE",
+        "DATA EXAME",
+        "MODALIDADE",
+        "ESPECIALIDADE",
+        "MODELO IA",
+    ]
+    return work[cols]
+
+
+def style_patient_table(df):
+    def row_style(row):
+        urgency = normalize_urgency(row.get("URGENCIA", ""))
+        bg = ROW_BG_BY_URGENCY.get(urgency, "#1a2230")
+        styles = [f"background-color: {bg}; color: #dfe9f3;"] * len(row)
+        return styles
+
+    styler = df.style.apply(row_style, axis=1)
+    styler = styler.set_properties(subset=["URGENCIA", "SCORE MALIG.", "SAME"], **{"font-weight": "700"})
+    return styler
+
+
+def render_specialty_tabs(df):
+    if df.empty:
+        st.info("Nenhum paciente minerado ainda.")
+        return
+
+    table_cols = ["URGENCIA", "SCORE MALIG.", "SAME", "NOME", "IDADE", "DATA EXAME", "MODALIDADE"]
+    specialty_counts = df["ESPECIALIDADE"].value_counts()
+    labels = [f"Todos ({len(df)})"] + [f"{name} ({count})" for name, count in specialty_counts.items()]
+    tabs = st.tabs(labels)
+
+    with tabs[0]:
+        st.dataframe(style_patient_table(df[table_cols]), use_container_width=True, height=620, hide_index=True)
+
+    for idx, (name, _count) in enumerate(specialty_counts.items(), start=1):
+        with tabs[idx]:
+            filtered = df[df["ESPECIALIDADE"] == name][table_cols]
+            st.dataframe(style_patient_table(filtered), use_container_width=True, height=620, hide_index=True)
+
+
+def render_css():
+    st.markdown(
+        """
+        <style>
+        .onco-toolbar {
+            background: linear-gradient(180deg, #2a2f37, #1f252e);
+            border: 1px solid #4a4f58;
+            border-radius: 10px;
+            padding: 10px 12px;
+            margin-bottom: 12px;
+        }
+        .onco-toolbar-title {
+            font-size: 14px;
+            color: #ced4da;
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .onco-status {
+            color: #b5c1cf;
+            font-size: 14px;
+            margin-bottom: 6px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if st.button("Minerar e salvar no banco", type="primary"):
+
+def test_ai_connection(provider, model, api_key):
+    test_text = (
+        "PACIENTE: TESTE SISTEMA\n"
+        "SAME: 123456\n"
+        "EXAME: TC de torax\n"
+        "Achado: nodulo pulmonar suspeito para malignidade."
+    )
+    raw = call_ai(provider, model, api_key, test_text)
+    parsed = extract_json_block(raw)
+    if not isinstance(parsed, dict):
+        raise RuntimeError(f"Resposta nao retornou JSON valido: {raw[:500]}")
+    return parsed
+
+
+def main():
+    render_css()
+
+    st.title("Minerador de Achados Suspeitos de Tumor")
+    st.caption("Mineracao com IA + lista de pacientes minerados por especialidade no mesmo banco do dashboard.")
+
+    db_path = st.sidebar.text_input("DB_PATH (SQLite)", value=get_db_path())
+    only_eligible = st.sidebar.checkbox("Mostrar somente elegiveis", value=False)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Inicializar/Substituir banco")
+    uploaded_db = st.sidebar.file_uploader("Upload banco SQLite", type=["db", "sqlite", "sqlite3"], key="db_upload")
+    if uploaded_db is not None and st.sidebar.button("Salvar banco em DB_PATH"):
+        try:
+            save_uploaded_db(uploaded_db, db_path)
+            st.sidebar.success("Banco salvo com sucesso.")
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.sidebar.error(str(exc))
+
+    provider_cols = st.columns([1.1, 1.2, 1.2, 1.1, 1.1])
+    provider = provider_cols[0].selectbox("API", list(MODEL_OPTIONS.keys()), index=0)
+    base_models = MODEL_OPTIONS.get(provider, [])
+    selected_model = provider_cols[1].selectbox("Modelo", base_models, index=0 if base_models else None)
+    custom_model = provider_cols[2].text_input("Modelo custom", value="")
+    effective_model = custom_model.strip() or selected_model
+
+    env_key_name = PROVIDER_ENV_KEYS.get(provider, "")
+    default_api_key = os.getenv(env_key_name, "") if env_key_name else ""
+    api_key = provider_cols[3].text_input(
+        "API Key",
+        type="password",
+        value=st.session_state.get(f"api_key_{provider}", default_api_key),
+        help=f"Variavel de ambiente: {env_key_name}" if env_key_name else "Nao requer chave para uso local.",
+    )
+    st.session_state[f"api_key_{provider}"] = api_key
+
+    st.markdown('<div class="onco-toolbar">', unsafe_allow_html=True)
+    st.markdown('<div class="onco-toolbar-title">Controles de Mineracao</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="onco-status">Status: Pronto | Provider: {provider} | Modelo: {effective_model}</div>', unsafe_allow_html=True)
+
+    control_cols = st.columns([1.6, 1.2, 1.2, 1.0])
+    uploaded_files = control_cols[0].file_uploader(
+        "Selecionar arquivos PDF",
+        type=["pdf"],
+        accept_multiple_files=True,
+        label_visibility="collapsed",
+    )
+    start_clicked = control_cols[1].button("Iniciar Processamento", type="primary", use_container_width=True)
+    test_clicked = control_cols[2].button("Testar IA", use_container_width=True)
+    clear_clicked = control_cols[3].button("Limpar Cache", use_container_width=True)
+
+    if clear_clicked:
+        st.cache_data.clear()
+        st.rerun()
+
+    if test_clicked:
+        try:
+            if provider != "LLM Studio" and not api_key:
+                raise RuntimeError("API key obrigatoria para o provider selecionado.")
+            parsed = test_ai_connection(provider, effective_model, api_key)
+            st.success("Teste de IA concluido com sucesso.")
+            st.json(parsed)
+        except Exception as exc:
+            st.error(f"Falha no teste de IA: {exc}")
+
+    run_rows = []
+    run_errors = []
+    if start_clicked:
         if not uploaded_files:
             st.warning("Selecione pelo menos um PDF.")
-            st.stop()
+        elif provider != "LLM Studio" and not api_key:
+            st.error("API key obrigatoria para o provider selecionado.")
+        else:
+            ensure_schema(db_path)
+            progress = st.progress(0)
+            status_box = st.empty()
+            total = len(uploaded_files)
 
-        ensure_schema(db_path)
-        progress = st.progress(0)
-        status = st.empty()
-        rows = []
-        errors = []
+            for idx, uploaded in enumerate(uploaded_files, start=1):
+                try:
+                    row = process_pdf_with_ai(uploaded, db_path, provider, effective_model, api_key)
+                    run_rows.append(row)
+                except Exception as exc:
+                    run_errors.append({"arquivo": uploaded.name, "erro": str(exc)})
 
-        total = len(uploaded_files)
-        for idx, uploaded in enumerate(uploaded_files, start=1):
-            try:
-                rows.append(process_pdf(uploaded, db_path))
-            except Exception as exc:
-                errors.append({"arquivo": uploaded.name, "erro": str(exc)})
-            progress.progress(int(idx * 100 / total))
-            status.text(f"Processados {idx}/{total}")
+                progress.progress(int(idx * 100 / total))
+                status_box.text(f"Processados {idx}/{total}")
 
-        st.success(f"Mineracao concluida. Sucesso: {len(rows)} | Erros: {len(errors)}")
+            st.cache_data.clear()
+            st.success(f"Processamento concluido. Sucesso: {len(run_rows)} | Erros: {len(run_errors)}")
 
-        if rows:
-            df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            st.download_button(
-                "Baixar resumo CSV",
-                df.to_csv(index=False).encode("utf-8"),
-                file_name="resumo_mineracao_onco.csv",
-                mime="text/csv",
-            )
+    st.markdown("</div>", unsafe_allow_html=True)
 
-        if errors:
-            st.error("Alguns arquivos falharam:")
-            st.dataframe(pd.DataFrame(errors), use_container_width=True, hide_index=True)
+    if run_rows:
+        st.subheader("Resumo da execucao")
+        run_df = pd.DataFrame(run_rows)
+        st.dataframe(run_df, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Exportar resultados da execucao (CSV)",
+            run_df.to_csv(index=False).encode("utf-8"),
+            file_name="resultado_mineracao_execucao.csv",
+            mime="text/csv",
+        )
+
+    if run_errors:
+        st.error("Arquivos com falha:")
+        st.dataframe(pd.DataFrame(run_errors), use_container_width=True, hide_index=True)
 
     st.markdown("---")
-    st.info("Apos minerar, abra a pagina principal do Dashboard para ver os indicadores atualizados.")
+    st.subheader("Resultados")
+
+    if not os.path.exists(db_path):
+        st.warning("Banco nao encontrado no DB_PATH atual.")
+        st.stop()
+
+    try:
+        mtime = os.path.getmtime(db_path)
+        raw_df = load_patients_from_db(db_path, mtime)
+    except Exception as exc:
+        st.error(f"Erro ao ler banco: {exc}")
+        st.stop()
+
+    display_df = build_results_dataframe(raw_df, only_eligible)
+
+    tab_resumo, tab_detalhado, tab_analise = st.tabs([
+        "Resumo",
+        "Resultados Detalhados",
+        "Analise Detalhada",
+    ])
+
+    with tab_resumo:
+        total = len(display_df)
+        metric_cols = st.columns(len(URGENCY_ORDER) + 1)
+        metric_cols[0].metric("Total", total)
+        for i, urg in enumerate(URGENCY_ORDER, start=1):
+            count = int((display_df["URGENCIA"] == urg).sum()) if not display_df.empty else 0
+            metric_cols[i].metric(urg, count)
+
+        if not display_df.empty:
+            sp_counts = display_df["ESPECIALIDADE"].value_counts().reset_index()
+            sp_counts.columns = ["Especialidade", "Pacientes"]
+            st.dataframe(sp_counts, use_container_width=True, hide_index=True)
+
+    with tab_detalhado:
+        render_specialty_tabs(display_df)
+
+    with tab_analise:
+        if display_df.empty:
+            st.info("Sem dados para analise.")
+        else:
+            st.dataframe(display_df[["SAME", "NOME", "ESPECIALIDADE", "MODELO IA", "URGENCIA"]], use_container_width=True, hide_index=True)
+            st.caption("Coluna MODELO IA comprova qual modelo executou a mineracao.")
 
 
 if __name__ == "__main__":
