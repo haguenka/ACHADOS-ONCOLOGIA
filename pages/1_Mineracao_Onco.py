@@ -797,7 +797,7 @@ def extract_selected_rows(event):
     return []
 
 
-def register_double_click(table_key, row_idx, threshold=0.8):
+def register_double_click(table_key, row_idx, threshold=2.0):
     now = time.time()
     signature = f"{table_key}:{row_idx}"
     last_signature = st.session_state.get("last_click_signature")
@@ -815,6 +815,8 @@ def render_clickable_patient_table(df, table_cols, table_key):
         return
 
     view_df = df[table_cols].copy()
+    nonce_key = f"{table_key}_nonce"
+    nonce = int(st.session_state.get(nonce_key, 0))
     event = st.dataframe(
         style_patient_table(view_df),
         use_container_width=True,
@@ -822,7 +824,7 @@ def render_clickable_patient_table(df, table_cols, table_key):
         hide_index=True,
         on_select="rerun",
         selection_mode="single-row",
-        key=f"{table_key}_grid",
+        key=f"{table_key}_grid_{nonce}",
     )
 
     selected_rows = extract_selected_rows(event)
@@ -841,8 +843,44 @@ def render_clickable_patient_table(df, table_cols, table_key):
     if register_double_click(table_key, row_idx):
         same_id = normalize_text(selected_row["same_id"])
         if same_id:
+            st.session_state["pending_same_id"] = ""
             st.session_state["detail_same_id"] = same_id
             st.session_state["open_detail_dialog"] = True
+            st.session_state[nonce_key] = nonce + 1
+            return
+
+    same_id = normalize_text(selected_row["same_id"])
+    if same_id:
+        st.session_state["pending_same_id"] = same_id
+
+    st.session_state[nonce_key] = nonce + 1
+    st.rerun()
+
+
+def render_pending_open_button(display_df):
+    same_id = normalize_text(st.session_state.get("pending_same_id"))
+    if not same_id:
+        return
+
+    matched = display_df[display_df["same_id"].astype(str) == same_id]
+    if matched.empty:
+        st.session_state["pending_same_id"] = ""
+        return
+
+    row = matched.iloc[0]
+    patient = normalize_text(row.get("NOME")) or "Paciente"
+
+    cols = st.columns([3, 1, 1])
+    cols[0].caption(f"Linha selecionada: {patient} | SAME: {same_id}")
+    if cols[1].button("Abrir analise detalhada", key=f"open_pending_{same_id}"):
+        st.session_state["detail_same_id"] = same_id
+        st.session_state["open_detail_dialog"] = True
+        st.session_state["pending_same_id"] = ""
+        st.rerun()
+
+    if cols[2].button("Limpar selecao", key=f"clear_pending_{same_id}"):
+        st.session_state["pending_same_id"] = ""
+        st.rerun()
 
 
 @st.dialog("Analise Detalhada do Paciente")
@@ -1139,6 +1177,7 @@ def main():
 
     with tab_detalhado:
         render_specialty_tabs(display_df)
+        render_pending_open_button(display_df)
         render_pending_detail_dialog(display_df)
 
     with tab_analise:
