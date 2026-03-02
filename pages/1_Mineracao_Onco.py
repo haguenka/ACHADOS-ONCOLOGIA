@@ -4,6 +4,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
@@ -11,6 +12,11 @@ from uuid import uuid4
 import pandas as pd
 import requests
 import streamlit as st
+
+try:
+    from fuzzywuzzy import fuzz
+except Exception:
+    fuzz = None
 
 
 MODEL_OPTIONS = {
@@ -52,6 +58,12 @@ SPECIALTY_BUCKETS = [
     "Obstetrico",
     "Musculoesqueletico",
 ]
+
+EXCEL_NAME_CANDIDATES = ["nome", "nome_paciente", "paciente_nome_social", "paciente"]
+EXCEL_CONVENIO_CANDIDATES = ["convenio", "plano_convenio"]
+EXCEL_TELEFONE_CANDIDATES = ["telefone", "fone", "tel", "celular"]
+EXCEL_SETOR_CANDIDATES = ["setor", "tipo_atendimento", "setor_executante", "departamento"]
+EXCEL_SAME_CANDIDATES = ["same", "same_id", "sameid"]
 
 
 def init_model_cache():
@@ -311,6 +323,250 @@ def normalize_bool(value):
         return int(value) == 1
     text = ascii_fold(value).lower()
     return text in {"1", "true", "sim", "yes", "y"}
+
+
+def normalize_excel_column_name(value):
+    text = ascii_fold(value).lower().strip()
+    text = re.sub(r"[^a-z0-9]+", "_", text)
+    return text.strip("_")
+
+
+def normalize_same(value):
+    text = normalize_text(value)
+    if not text:
+        return ""
+    only_digits = re.sub(r"\D", "", text)
+    if len(only_digits) >= 4:
+        return only_digits
+    folded = ascii_fold(text).upper()
+    return re.sub(r"[^A-Z0-9]", "", folded)
+
+
+def normalize_name_for_match(value):
+    text = ascii_fold(value).upper().strip()
+    text = re.sub(r"[^A-Z0-9 ]+", " ", text)
+    text = " ".join(text.split())
+    return text
+
+
+def token_set_similarity(a, b):
+    if not a or not b:
+        return 0.0
+    tokens_a = set(a.split())
+    tokens_b = set(b.split())
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    if intersection == 0:
+        return 0.0
+    return (2.0 * intersection / (len(tokens_a) + len(tokens_b))) * 100.0
+
+
+def partial_similarity(a, b):
+    if not a or not b:
+        return 0.0
+    small, big = (a, b) if len(a) <= len(b) else (b, a)
+    if small in big:
+        return 100.0
+    return SequenceMatcher(None, small, big).ratio() * 100.0
+
+
+def similarity_scores(a, b):
+    if fuzz is not None:
+        return (
+            float(fuzz.ratio(a, b)),
+            float(fuzz.token_set_ratio(a, b)),
+            float(fuzz.partial_ratio(a, b)),
+        )
+    return (
+        SequenceMatcher(None, a, b).ratio() * 100.0,
+        token_set_similarity(a, b),
+        partial_similarity(a, b),
+    )
+
+
+def find_best_name_match(patient_name, excel_names_normalized, threshold):
+    clean_name = normalize_name_for_match(patient_name)
+    if not clean_name:
+        return None
+
+    for idx, excel_name in enumerate(excel_names_normalized):
+        if excel_name and excel_name == clean_name:
+            return idx, 100.0
+
+    best_idx = None
+    best_score = -1.0
+    for idx, excel_name in enumerate(excel_names_normalized):
+        if not excel_name:
+            continue
+        score_ratio, score_token, score_partial = similarity_scores(clean_name, excel_name)
+        score = max(score_ratio, score_token, score_partial)
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+
+    if best_idx is not None and best_score >= float(threshold):
+        return best_idx, best_score
+    return None
+
+
+def read_excel_for_correlation(uploaded_excel):
+    name = normalize_text(getattr(uploaded_excel, "name", ""))
+    lower = name.lower()
+    if lower.endswith(".xls"):
+        try:
+            return pd.read_excel(uploaded_excel, engine="xlrd")
+        except Exception:
+            uploaded_excel.seek(0)
+    return pd.read_excel(uploaded_excel)
+
+
+def normalize_excel_for_correlation(df_excel):
+    if df_excel is None or df_excel.empty:
+        raise RuntimeError("Arquivo Excel vazio.")
+
+    normalized_columns = [normalize_excel_column_name(c) for c in df_excel.columns]
+    if len(set(normalized_columns)) != len(normalized_columns):
+        used = {}
+        deduped = []
+        for col in normalized_columns:
+            count = used.get(col, 0) + 1
+            used[col] = count
+            deduped.append(col if count == 1 else f"{col}_{count}")
+        normalized_columns = deduped
+
+    work = df_excel.copy()
+    work.columns = normalized_columns
+
+    def pick_col(candidates):
+        return next((c for c in candidates if c in work.columns), None)
+
+    name_col = pick_col(EXCEL_NAME_CANDIDATES)
+    convenio_col = pick_col(EXCEL_CONVENIO_CANDIDATES)
+    telefone_col = pick_col(EXCEL_TELEFONE_CANDIDATES)
+    setor_col = pick_col(EXCEL_SETOR_CANDIDATES)
+    same_col = pick_col(EXCEL_SAME_CANDIDATES)
+
+    if not name_col:
+        raise RuntimeError(
+            "Coluna de nome nao encontrada no Excel. Use uma das colunas: "
+            + ", ".join(EXCEL_NAME_CANDIDATES)
+        )
+
+    if not convenio_col and not telefone_col and not setor_col:
+        raise RuntimeError(
+            "Nenhuma coluna de convenio/telefone/setor encontrada no Excel."
+        )
+
+    work["nome"] = work[name_col]
+    work["convenio"] = work[convenio_col] if convenio_col else None
+    if "plano_convenio" in work.columns:
+        convenio_text = work["convenio"].astype(str).str.strip()
+        fallback_mask = work["convenio"].isna() | (convenio_text == "")
+        work.loc[fallback_mask, "convenio"] = work.loc[fallback_mask, "plano_convenio"]
+    work["telefone"] = work[telefone_col] if telefone_col else None
+    work["setor"] = work[setor_col] if setor_col else None
+    work["same"] = work[same_col] if same_col else None
+
+    work["nome_norm"] = work["nome"].apply(normalize_name_for_match)
+    work["same_norm"] = work["same"].apply(normalize_same)
+    work = work[(work["nome_norm"] != "") | (work["same_norm"] != "")].reset_index(drop=True)
+    if work.empty:
+        raise RuntimeError("Arquivo Excel sem linhas validas para correlacao.")
+    return work
+
+
+def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
+    ensure_schema(db_path)
+    df_excel_raw = read_excel_for_correlation(uploaded_excel)
+    df_excel = normalize_excel_for_correlation(df_excel_raw)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT same_id, patient_name, convenio, telefone, setor FROM patients")
+        patients = cursor.fetchall()
+
+        total_patients = len(patients)
+        if total_patients == 0:
+            return {
+                "success": True,
+                "total_patients": 0,
+                "matched_patients": 0,
+                "updated_patients": 0,
+                "unmatched_patients": 0,
+                "match_rate": 0.0,
+                "updated_counts": {"convenio": 0, "telefone": 0, "setor": 0},
+            }
+
+        same_index_map = {}
+        for idx, same_norm in enumerate(df_excel["same_norm"].tolist()):
+            if same_norm and same_norm not in same_index_map:
+                same_index_map[same_norm] = idx
+
+        excel_names_normalized = df_excel["nome_norm"].tolist()
+        matched_patients = 0
+        updated_patients = 0
+        unmatched_patients = 0
+        updated_counts = {"convenio": 0, "telefone": 0, "setor": 0}
+
+        for same_id, patient_name, current_convenio, current_telefone, current_setor in patients:
+            if not normalize_text(patient_name):
+                unmatched_patients += 1
+                continue
+
+            best_idx = None
+
+            same_norm = normalize_same(same_id)
+            if same_norm and same_norm in same_index_map:
+                best_idx = same_index_map[same_norm]
+            else:
+                name_match = find_best_name_match(patient_name, excel_names_normalized, threshold)
+                if name_match is not None:
+                    best_idx, _ = name_match
+
+            if best_idx is None:
+                unmatched_patients += 1
+                continue
+
+            matched_patients += 1
+            excel_row = df_excel.iloc[best_idx]
+            excel_convenio = normalize_text(excel_row.get("convenio"))
+            excel_telefone = normalize_text(excel_row.get("telefone"))
+            excel_setor = normalize_text(excel_row.get("setor"))
+
+            update_fields = {}
+            if excel_convenio and normalize_text(current_convenio) != excel_convenio:
+                update_fields["convenio"] = excel_convenio
+                updated_counts["convenio"] += 1
+            if excel_telefone and normalize_text(current_telefone) != excel_telefone:
+                update_fields["telefone"] = excel_telefone
+                updated_counts["telefone"] += 1
+            if excel_setor and normalize_text(current_setor) != excel_setor:
+                update_fields["setor"] = excel_setor
+                updated_counts["setor"] += 1
+
+            if not update_fields:
+                continue
+
+            query = "UPDATE patients SET " + ", ".join([f"{k} = ?" for k in update_fields.keys()]) + " WHERE same_id = ?"
+            values = list(update_fields.values()) + [same_id]
+            cursor.execute(query, values)
+            updated_patients += 1
+
+        conn.commit()
+
+        return {
+            "success": True,
+            "total_patients": total_patients,
+            "matched_patients": matched_patients,
+            "updated_patients": updated_patients,
+            "unmatched_patients": unmatched_patients,
+            "match_rate": (matched_patients / total_patients) * 100.0 if total_patients else 0.0,
+            "updated_counts": updated_counts,
+        }
+    finally:
+        conn.close()
 
 
 def extract_json_block(text):
@@ -1254,6 +1510,51 @@ def main():
             st.rerun()
         except Exception as exc:
             st.sidebar.error(str(exc))
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Correlacionar setor/convenio")
+    uploaded_corr_excel = st.sidebar.file_uploader(
+        "Upload Excel (XLS/XLSX)",
+        type=["xls", "xlsx"],
+        key="corr_excel_upload",
+    )
+    corr_threshold = st.sidebar.slider(
+        "Similaridade minima (%)",
+        min_value=60,
+        max_value=100,
+        value=70,
+        step=1,
+        key="corr_threshold_slider",
+    )
+    if st.sidebar.button("Correlacionar Excel com pacientes", use_container_width=True):
+        if uploaded_corr_excel is None:
+            st.sidebar.error("Selecione um arquivo Excel antes de correlacionar.")
+        else:
+            try:
+                result = correlate_patients_with_excel_upload(db_path, uploaded_corr_excel, corr_threshold)
+                st.session_state["excel_correlation_result"] = result
+                st.cache_data.clear()
+                st.rerun()
+            except Exception as exc:
+                st.sidebar.error(f"Falha na correlacao: {exc}")
+
+    corr_result = st.session_state.get("excel_correlation_result")
+    if isinstance(corr_result, dict) and corr_result.get("success"):
+        updated_counts = corr_result.get("updated_counts", {})
+        st.sidebar.success(
+            (
+                "Correlacao concluida: "
+                f"{corr_result.get('updated_patients', 0)} pacientes atualizados "
+                f"de {corr_result.get('matched_patients', 0)} correlacionados."
+            )
+        )
+        st.sidebar.caption(
+            (
+                f"Campos atualizados -> convenio: {int(updated_counts.get('convenio', 0))}, "
+                f"telefone: {int(updated_counts.get('telefone', 0))}, "
+                f"setor: {int(updated_counts.get('setor', 0))}"
+            )
+        )
 
     provider_cols = st.columns([1.0, 1.25, 1.25, 1.35, 1.15])
     provider = provider_cols[0].selectbox("API", list(MODEL_OPTIONS.keys()), index=0)
