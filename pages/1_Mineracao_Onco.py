@@ -1,8 +1,8 @@
 import json
+import html
 import os
 import re
 import sqlite3
-import time
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +74,10 @@ def normalize_text(value):
     if value is None:
         return ""
     return str(value).strip()
+
+
+def esc(value):
+    return html.escape(normalize_text(value))
 
 
 def ascii_fold(value):
@@ -778,144 +782,108 @@ def render_specialty_tabs(df):
             render_clickable_patient_table(filtered, table_cols, f"tab_{idx}_{ascii_fold(name)}")
 
 
-def extract_selected_rows(event):
-    if event is None:
-        return []
-    try:
-        rows = event.selection.rows
-        if isinstance(rows, list):
-            return rows
-    except Exception:
-        pass
-
-    if isinstance(event, dict):
-        selection = event.get("selection", {})
-        rows = selection.get("rows", [])
-        if isinstance(rows, list):
-            return rows
-
-    return []
-
-
-def register_double_click(table_key, row_idx, threshold=2.0):
-    now = time.time()
-    signature = f"{table_key}:{row_idx}"
-    last_signature = st.session_state.get("last_click_signature")
-    last_ts = st.session_state.get("last_click_ts", 0.0)
-
-    st.session_state["last_click_signature"] = signature
-    st.session_state["last_click_ts"] = now
-
-    return signature == last_signature and (now - last_ts) <= threshold
-
-
 def render_clickable_patient_table(df, table_cols, table_key):
     if df.empty:
         st.info("Sem pacientes nesta aba.")
         return
 
+    open_labels = []
+    open_same_by_label = {}
+    for _, row in df.head(1000).iterrows():
+        same = normalize_text(row.get("SAME"))
+        nome = normalize_text(row.get("NOME"))
+        urg = normalize_text(row.get("URGENCIA"))
+        label = f"{nome} | SAME {same} | {urg}"
+        open_labels.append(label)
+        open_same_by_label[label] = normalize_text(row.get("same_id"))
+
+    if not open_labels:
+        st.info("Sem pacientes para selecao.")
+        return
+
+    cols = st.columns([4, 1, 3])
+    selected_label = cols[0].selectbox(
+        "Selecionar linha do paciente",
+        open_labels,
+        key=f"{table_key}_open_select",
+    )
+    selected_same = open_same_by_label.get(selected_label, "")
+    st.session_state[f"{table_key}_selected_same"] = selected_same
+
+    if cols[1].button("Abrir analise detalhada", key=f"{table_key}_open_btn"):
+        same_id = selected_same
+        if same_id:
+            st.session_state["detail_same_id"] = same_id
+            st.session_state["open_detail_dialog"] = True
+            st.rerun()
+    cols[2].caption("Use o seletor acima e abra os detalhes.")
+
     view_df = df[table_cols].copy()
-    nonce_key = f"{table_key}_nonce"
-    nonce = int(st.session_state.get(nonce_key, 0))
-    event = st.dataframe(
-        view_df,
+    marker_col = []
+    for _, row in view_df.iterrows():
+        marker_col.append("▶" if normalize_text(row.get("SAME")) == selected_same else "")
+    view_df.insert(0, "SEL", marker_col)
+
+    st.dataframe(
+        style_patient_table(view_df),
         use_container_width=True,
         height=620,
         hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=f"{table_key}_grid_{nonce}",
     )
 
-    selected_rows = extract_selected_rows(event)
-    if not selected_rows:
-        return
 
-    row_idx = selected_rows[0]
-    selected_row = None
-    if isinstance(row_idx, int) and 0 <= row_idx < len(df):
-        selected_row = df.iloc[row_idx]
-    elif row_idx in df.index:
-        selected_row = df.loc[row_idx]
-    else:
-        return
+def extract_ai_field(ai_text, keys):
+    text = normalize_text(ai_text)
+    if not text:
+        return ""
 
-    if register_double_click(table_key, row_idx):
-        same_id = normalize_text(selected_row["same_id"])
-        if same_id:
-            st.session_state["pending_same_id"] = ""
-            st.session_state["detail_same_id"] = same_id
-            st.session_state["open_detail_dialog"] = True
-            st.session_state[nonce_key] = nonce + 1
-            return
-
-    same_id = normalize_text(selected_row["same_id"])
-    if same_id:
-        st.session_state["pending_same_id"] = same_id
-
-    st.session_state[nonce_key] = nonce + 1
-    st.rerun()
+    for key in keys:
+        pattern = rf"{re.escape(key)}\\s*:\\s*(.+?)(?:\\n[A-Z_\\*\\s]+:|$)"
+        match = re.search(pattern, text, flags=re.IGNORECASE | re.DOTALL)
+        if match:
+            return normalize_text(match.group(1))
+    return ""
 
 
-def render_pending_open_button(display_df):
-    same_id = normalize_text(st.session_state.get("pending_same_id"))
-    if not same_id:
-        return
-
-    matched = display_df[display_df["same_id"].astype(str) == same_id]
-    if matched.empty:
-        st.session_state["pending_same_id"] = ""
-        return
-
-    row = matched.iloc[0]
-    patient = normalize_text(row.get("NOME")) or "Paciente"
-
-    cols = st.columns([3, 1, 1])
-    cols[0].caption(f"Linha selecionada: {patient} | SAME: {same_id}")
-    if cols[1].button("Abrir analise detalhada", key=f"open_pending_{same_id}"):
-        st.session_state["detail_same_id"] = same_id
-        st.session_state["open_detail_dialog"] = True
-        st.session_state["pending_same_id"] = ""
-        st.rerun()
-
-    if cols[2].button("Limpar selecao", key=f"clear_pending_{same_id}"):
-        st.session_state["pending_same_id"] = ""
-        st.rerun()
-
-
-def render_analysis_tab_open_selector(display_df):
-    if display_df.empty:
-        return
-
-    st.markdown("---")
-    st.caption("Abertura direta da analise detalhada")
-
-    option_labels = []
-    same_by_label = {}
-    for _, row in display_df.head(1000).iterrows():
-        same = normalize_text(row.get("SAME"))
-        nome = normalize_text(row.get("NOME"))
-        esp = normalize_text(row.get("ESPECIALIDADE"))
-        label = f"{nome} | SAME {same} | {esp}"
-        option_labels.append(label)
-        same_by_label[label] = normalize_text(row.get("same_id"))
-
-    if not option_labels:
-        return
-
-    selected_label = st.selectbox(
-        "Selecionar paciente",
-        option_labels,
-        key="analysis_tab_patient_select",
+def extract_achados_clinicos(row):
+    direct = normalize_text(row.get("tumor_findings"))
+    if direct:
+        return direct
+    return extract_ai_field(
+        row.get("ai_analysis"),
+        ["ACHADOS", "**ACHADOS**", "ACHADOS CLINICOS PRINCIPAIS"],
     )
-    selected_same = same_by_label.get(selected_label, "")
 
-    cols = st.columns([1, 1, 4])
-    if cols[0].button("Abrir analise detalhada", key="analysis_tab_open_btn"):
-        if selected_same:
-            st.session_state["detail_same_id"] = selected_same
-            st.session_state["open_detail_dialog"] = True
-            st.rerun()
+
+def extract_localizacao(row):
+    direct = normalize_text(row.get("tumor_location"))
+    if direct:
+        return direct
+    return extract_ai_field(
+        row.get("ai_analysis"),
+        ["LOCALIZACAO", "LOCALIZACAO E CARACTERISTICAS", "TUMOR_LOCATION"],
+    )
+
+
+def extract_caracteristicas(row):
+    direct = normalize_text(row.get("tumor_characteristics"))
+    if direct:
+        return direct
+    return extract_ai_field(
+        row.get("ai_analysis"),
+        ["CARACTERISTICAS", "TUMOR_CHARACTERISTICS"],
+    )
+
+
+def urgency_badge_color(urgency):
+    palette = {
+        "CRITICA": "#c1121f",
+        "MUITO ALTA": "#e85d04",
+        "ALTA": "#f59f00",
+        "MODERADA": "#1971c2",
+        "BAIXA": "#2b8a3e",
+    }
+    return palette.get(normalize_urgency(urgency), "#3b3f46")
 
 
 @st.dialog("Analise Detalhada do Paciente")
@@ -923,27 +891,87 @@ def show_patient_detail_dialog(row):
     patient_name = normalize_text(row.get("NOME")) or "Paciente"
     urgency = normalize_urgency(row.get("URGENCIA"))
     score_txt = normalize_text(row.get("SCORE MALIG."))
+    score_num = normalize_score(score_txt.split("/")[0] if "/" in score_txt else score_txt)
+    stars = "*" * score_num + "." * (5 - score_num)
+    urg_color = urgency_badge_color(urgency)
 
-    st.subheader(patient_name)
-    meta_cols = st.columns([2, 1, 1, 1])
-    meta_cols[0].markdown(
-        f"**SAME:** {normalize_text(row.get('SAME'))}  \n"
-        f"**Idade:** {normalize_text(row.get('IDADE'))}  \n"
-        f"**Data:** {normalize_text(row.get('DATA EXAME'))}"
-    )
-    meta_cols[1].metric("Urgencia", urgency)
-    meta_cols[2].metric("Malignidade", score_txt)
-    meta_cols[3].metric("Modalidade", normalize_text(row.get("MODALIDADE")))
+    modalidade = normalize_text(row.get("MODALIDADE"))
+    especialidade = normalize_text(row.get("ESPECIALIDADE"))
+    achados = extract_achados_clinicos(row) or "Sem descricao de achados."
+    localizacao = extract_localizacao(row) or "Nao informado."
+    caracteristicas = extract_caracteristicas(row) or "Nao informado."
+    urgency_reason = normalize_text(row.get("urgency_reason")) or "Nao informado."
+    model_ia = normalize_text(row.get("MODELO IA")) or "Nao informado."
+
+    top_cols = st.columns([4.5, 1.2])
+    with top_cols[0]:
+        st.markdown(
+            f"""
+            <div class="detail-header-block">
+                <div class="detail-patient-name">{esc(patient_name)}</div>
+                <div class="detail-patient-meta">
+                    <span>SAME: {esc(row.get('SAME'))}</span>
+                    <span>Idade: {esc(row.get('IDADE'))}</span>
+                    <span>Data: {esc(row.get('DATA EXAME'))}</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    with top_cols[1]:
+        st.markdown(
+            f"""
+            <div class="detail-side-stack">
+                <div class="detail-side-card" style="border-color:{urg_color};">
+                    <div class="detail-side-title">URGENCIA</div>
+                    <div class="detail-side-value">{esc(urgency)}</div>
+                </div>
+                <div class="detail-side-card">
+                    <div class="detail-side-title">MALIGNIDADE</div>
+                    <div class="detail-side-stars">{esc(stars)}</div>
+                    <div class="detail-side-value">{esc(score_txt)}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     tab_ai, tab_full, tab_details = st.tabs(["Analise IA", "Texto Completo", "Detalhes"])
 
     with tab_ai:
+        st.markdown(
+            f"""
+            <div class="detail-main-panel">
+                <div class="detail-panel-title">ANALISE DA INTELIGENCIA ARTIFICIAL</div>
+                <div class="detail-section">
+                    <div class="detail-section-title">INFORMACOES DO EXAME</div>
+                    <div class="detail-line"><b>Modalidade:</b> {esc(modalidade)}</div>
+                    <div class="detail-line"><b>Especialidade:</b> {esc(especialidade)}</div>
+                    <div class="detail-line"><b>Modelo IA:</b> {esc(model_ia)}</div>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-section-title">ACHADOS CLINICOS PRINCIPAIS</div>
+                    <div class="detail-content">{esc(achados)}</div>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-section-title">LOCALIZACAO E CARACTERISTICAS</div>
+                    <div class="detail-content"><b>Localizacao:</b> {esc(localizacao)}</div>
+                    <div class="detail-content"><b>Caracteristicas:</b> {esc(caracteristicas)}</div>
+                </div>
+                <div class="detail-section">
+                    <div class="detail-section-title">JUSTIFICATIVA DE URGENCIA</div>
+                    <div class="detail-content">{esc(urgency_reason)}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
         st.text_area(
-            "Analise gerada pela IA",
+            "Bloco original da IA",
             value=normalize_text(row.get("ai_analysis")) or "Sem analise IA salva.",
-            height=360,
+            height=190,
             disabled=True,
-            key=f"ai_detail_{normalize_text(row.get('same_id'))}",
+            key=f"ai_detail_raw_{normalize_text(row.get('same_id'))}",
         )
 
     with tab_full:
@@ -1009,6 +1037,92 @@ def render_css():
             color: #b5c1cf;
             font-size: 14px;
             margin-bottom: 6px;
+        }
+        .detail-header-block {
+            background: linear-gradient(180deg, #27241f, #221f1a);
+            border: 1px solid #3a332b;
+            border-radius: 10px;
+            padding: 12px 14px;
+            margin-bottom: 8px;
+        }
+        .detail-patient-name {
+            font-size: 44px;
+            font-weight: 900;
+            color: #f1f3f5;
+            line-height: 1.05;
+            margin-bottom: 8px;
+        }
+        .detail-patient-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            color: #ced4da;
+            font-size: 15px;
+            font-weight: 600;
+        }
+        .detail-side-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .detail-side-card {
+            background: linear-gradient(180deg, #2b2214, #1f1b16);
+            border: 2px solid #5c4c2a;
+            border-radius: 10px;
+            padding: 8px;
+            text-align: center;
+        }
+        .detail-side-title {
+            font-size: 12px;
+            font-weight: 800;
+            color: #ffa94d;
+            letter-spacing: 0.5px;
+            margin-bottom: 3px;
+        }
+        .detail-side-value {
+            font-size: 28px;
+            font-weight: 900;
+            color: #ffe066;
+            line-height: 1.05;
+        }
+        .detail-side-stars {
+            font-size: 22px;
+            letter-spacing: 1px;
+            color: #ff6b6b;
+            margin: 2px 0;
+        }
+        .detail-main-panel {
+            background: linear-gradient(180deg, #071a2f, #051224);
+            border: 1px solid #173a63;
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 10px;
+        }
+        .detail-panel-title {
+            font-size: 34px;
+            font-weight: 900;
+            color: #f1f3f5;
+            margin-bottom: 10px;
+        }
+        .detail-section {
+            background: rgba(2, 28, 60, 0.55);
+            border: 1px solid #123c6d;
+            border-radius: 8px;
+            padding: 10px;
+            margin-bottom: 9px;
+        }
+        .detail-section-title {
+            font-size: 26px;
+            font-weight: 900;
+            margin-bottom: 6px;
+            color: #4dabf7;
+            line-height: 1.1;
+        }
+        .detail-line, .detail-content {
+            color: #dee2e6;
+            font-size: 20px;
+            line-height: 1.35;
+            margin-bottom: 2px;
         }
         </style>
         """,
@@ -1212,7 +1326,6 @@ def main():
 
     with tab_detalhado:
         render_specialty_tabs(display_df)
-        render_pending_open_button(display_df)
         render_pending_detail_dialog(display_df)
 
     with tab_analise:
@@ -1221,7 +1334,6 @@ def main():
         else:
             st.dataframe(display_df[["SAME", "NOME", "ESPECIALIDADE", "MODELO IA", "URGENCIA"]], use_container_width=True, hide_index=True)
             st.caption("Coluna MODELO IA comprova qual modelo executou a mineracao.")
-            render_analysis_tab_open_selector(display_df)
             render_pending_detail_dialog(display_df)
 
 
