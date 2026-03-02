@@ -43,12 +43,12 @@ ROW_BG_BY_URGENCY = {
 }
 
 SPECIALTY_BUCKETS = [
-    "Neurologis",
+    "Neurologia",
     "Cabeca e pescoco",
     "Torax",
-    "Abdome e pelve urologia (medicina interna)",
-    "Gineclogico (utero/ovarios)",
-    "Mama (mama e axilas)",
+    "Abdome e pelve / urologia (medicina interna)",
+    "Ginecologico (utero/ovarios)",
+    "Mama (mamas e axilas)",
     "Obstetrico",
     "Musculoesqueletico",
 ]
@@ -91,7 +91,7 @@ def specialty_chip(name):
         return "🫁"
     if "abdome" in key or "pelve" in key or "urologia" in key:
         return "🟠"
-    if "gineclogico" in key:
+    if "ginecologico" in key:
         return "🩺"
     if "mama" in key:
         return "🌸"
@@ -266,11 +266,11 @@ def canonical_specialty(raw_specialty, source_text=""):
     if any(t in text for t in ["OBST", "GESTA", "FETO", "PLACENTA", "GRAVID"]):
         return "Obstetrico"
     if any(t in text for t in ["MAMA", "MAMAR", "AXILA", "BIRADS", "BI-RADS"]):
-        return "Mama (mama e axilas)"
+        return "Mama (mamas e axilas)"
     if any(t in text for t in ["UTERO", "OVARIO", "ENDOMET", "ADNEX", "GINECO", "ANEXIAL"]):
-        return "Gineclogico (utero/ovarios)"
+        return "Ginecologico (utero/ovarios)"
     if any(t in text for t in ["ENCEF", "CEREBR", "NEURO", "INTRACRAN", "CRANIO", "SNC"]):
-        return "Neurologis"
+        return "Neurologia"
     if any(t in text for t in ["PESCOCO", "LARING", "OROFAR", "NASO", "SEIOS PARANASAIS", "TIREOID", "MANDIB", "FACE"]):
         return "Cabeca e pescoco"
     if any(t in text for t in ["TORAX", "PULMAO", "PULMON", "MEDIAST", "PLEURA", "CARDIO", "MAMARIA INTERNA"]):
@@ -278,10 +278,10 @@ def canonical_specialty(raw_specialty, source_text=""):
     if any(t in text for t in ["OSSO", "ARTIC", "MUSCUL", "TEND", "LIGAMENT", "COLUNA", "ORTOP", "ESQUELET"]):
         return "Musculoesqueletico"
     if any(t in text for t in ["ABDOM", "PELVE", "HEPAT", "FIGADO", "PANCREA", "RENAL", "RIM", "PROSTAT", "BEXIGA", "URO", "GASTRO", "INTEST", "BACO", "ADREN", "VESIC"]):
-        return "Abdome e pelve urologia (medicina interna)"
+        return "Abdome e pelve / urologia (medicina interna)"
 
     # Fallback para garantir somente os grupos definidos.
-    return "Abdome e pelve urologia (medicina interna)"
+    return "Abdome e pelve / urologia (medicina interna)"
 
 
 def normalize_urgency(value):
@@ -427,8 +427,8 @@ def ai_system_prompt():
         "medical_specialty, tumor_findings, tumor_location, tumor_characteristics, "
         "malignancy_score, urgency_level, urgency_reason, is_eligible. "
         "medical_specialty deve ser UMA destas opcoes: "
-        "Neurologis, Cabeca e pescoco, Torax, Abdome e pelve urologia (medicina interna), "
-        "Gineclogico (utero/ovarios), Mama (mama e axilas), Obstetrico, Musculoesqueletico. "
+        "Neurologia, Cabeca e pescoco, Torax, Abdome e pelve / urologia (medicina interna), "
+        "Ginecologico (utero/ovarios), Mama (mamas e axilas), Obstetrico, Musculoesqueletico. "
         "Regras: malignancy_score deve ser inteiro 0-5; urgency_level deve ser CRITICA, MUITO ALTA, ALTA, MODERADA ou BAIXA; "
         "is_eligible deve ser booleano. Se dado ausente, use string vazia."
     )
