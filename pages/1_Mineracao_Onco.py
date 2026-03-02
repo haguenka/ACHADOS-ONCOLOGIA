@@ -43,6 +43,33 @@ ROW_BG_BY_URGENCY = {
 }
 
 
+def init_model_cache():
+    if "models_by_provider" not in st.session_state:
+        st.session_state["models_by_provider"] = {
+            provider: list(models) for provider, models in MODEL_OPTIONS.items()
+        }
+
+
+def get_cached_models(provider):
+    init_model_cache()
+    return st.session_state["models_by_provider"].get(provider, list(MODEL_OPTIONS.get(provider, [])))
+
+
+def set_cached_models(provider, models):
+    init_model_cache()
+    if not models:
+        st.session_state["models_by_provider"][provider] = list(MODEL_OPTIONS.get(provider, []))
+    else:
+        unique_models = []
+        seen = set()
+        for model in models:
+            model_name = normalize_text(model)
+            if model_name and model_name not in seen:
+                unique_models.append(model_name)
+                seen.add(model_name)
+        st.session_state["models_by_provider"][provider] = unique_models or list(MODEL_OPTIONS.get(provider, []))
+
+
 def normalize_text(value):
     if value is None:
         return ""
@@ -271,6 +298,78 @@ def extract_json_block(text):
     return None
 
 
+def list_openai_compatible_models(base_url, api_key):
+    endpoint = base_url.rstrip("/") + "/models"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    response = requests.get(endpoint, headers=headers, timeout=60)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Falha ao listar modelos ({response.status_code}): {response.text[:400]}")
+
+    payload = response.json()
+    data = payload.get("data", [])
+    models = []
+    for item in data:
+        if isinstance(item, dict):
+            model_id = normalize_text(item.get("id", ""))
+            if model_id:
+                model_id_lower = model_id.lower()
+                blocked_tokens = [
+                    "embedding",
+                    "whisper",
+                    "tts",
+                    "transcribe",
+                    "moderation",
+                    "omni-moderation",
+                    "dall",
+                    "image",
+                    "audio",
+                ]
+                if any(token in model_id_lower for token in blocked_tokens):
+                    continue
+                models.append(model_id)
+    return sorted(set(models))
+
+
+def list_gemini_models(api_key):
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY nao informado.")
+
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    response = requests.get(endpoint, timeout=60)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Falha ao listar modelos Gemini ({response.status_code}): {response.text[:400]}")
+
+    payload = response.json()
+    models = []
+    for item in payload.get("models", []):
+        if not isinstance(item, dict):
+            continue
+        methods = item.get("supportedGenerationMethods", []) or []
+        if methods and "generateContent" not in methods:
+            continue
+        name = normalize_text(item.get("name", ""))
+        if name.startswith("models/"):
+            name = name.split("/", 1)[1]
+        if name:
+            models.append(name)
+    return sorted(set(models))
+
+
+def fetch_models_for_provider(provider, api_key):
+    if provider == "Gemini":
+        return list_gemini_models(api_key)
+
+    if provider in ("OpenAI", "DeepSeek", "LLM Studio"):
+        if provider != "LLM Studio" and not api_key:
+            raise RuntimeError("API key obrigatoria para listar modelos.")
+        return list_openai_compatible_models(PROVIDER_BASE_URLS[provider], api_key)
+
+    raise RuntimeError(f"Provider nao suportado: {provider}")
+
+
 def ai_system_prompt():
     return (
         "Voce e um especialista em radiologia oncologica. "
@@ -291,7 +390,7 @@ def call_openai_compatible(base_url, api_key, model, report_text):
 
     payload = {
         "model": model,
-        "temperature": 0.1,
+        "temperature": 1,
         "messages": [
             {"role": "system", "content": ai_system_prompt()},
             {
@@ -305,13 +404,30 @@ def call_openai_compatible(base_url, api_key, model, report_text):
         "response_format": {"type": "json_object"},
     }
 
-    response = requests.post(endpoint, headers=headers, json=payload, timeout=150)
-    if response.status_code >= 400:
-        payload.pop("response_format", None)
+    response = None
+    for _ in range(4):
         response = requests.post(endpoint, headers=headers, json=payload, timeout=150)
+        if response.status_code < 400:
+            break
 
-    if response.status_code >= 400:
-        raise RuntimeError(f"Falha na API ({response.status_code}): {response.text[:500]}")
+        error_txt = response.text.lower()
+        changed = False
+
+        if "temperature" in error_txt and "temperature" in payload:
+            payload.pop("temperature", None)
+            changed = True
+
+        if "response_format" in error_txt and "response_format" in payload:
+            payload.pop("response_format", None)
+            changed = True
+
+        if not changed:
+            break
+
+    if response is None or response.status_code >= 400:
+        status_code = response.status_code if response is not None else "sem_status"
+        error_body = response.text[:500] if response is not None else "sem resposta"
+        raise RuntimeError(f"Falha na API ({status_code}): {error_body}")
 
     data = response.json()
     return data["choices"][0]["message"]["content"]
@@ -333,10 +449,14 @@ def call_gemini(api_key, model, report_text):
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"temperature": 0.1},
+        "generationConfig": {"temperature": 1},
     }
 
     response = requests.post(endpoint, json=payload, timeout=150)
+    if response.status_code >= 400 and "temperature" in response.text.lower():
+        payload.pop("generationConfig", None)
+        response = requests.post(endpoint, json=payload, timeout=150)
+
     if response.status_code >= 400:
         raise RuntimeError(f"Falha na API Gemini ({response.status_code}): {response.text[:500]}")
 
@@ -858,12 +978,8 @@ def main():
         except Exception as exc:
             st.sidebar.error(str(exc))
 
-    provider_cols = st.columns([1.1, 1.2, 1.2, 1.1, 1.1])
+    provider_cols = st.columns([1.0, 1.25, 1.25, 1.35, 1.15])
     provider = provider_cols[0].selectbox("API", list(MODEL_OPTIONS.keys()), index=0)
-    base_models = MODEL_OPTIONS.get(provider, [])
-    selected_model = provider_cols[1].selectbox("Modelo", base_models, index=0 if base_models else None)
-    custom_model = provider_cols[2].text_input("Modelo custom", value="")
-    effective_model = custom_model.strip() or selected_model
 
     env_key_name = PROVIDER_ENV_KEYS.get(provider, "")
     default_api_key = os.getenv(env_key_name, "") if env_key_name else ""
@@ -874,6 +990,39 @@ def main():
         help=f"Variavel de ambiente: {env_key_name}" if env_key_name else "Nao requer chave para uso local.",
     )
     st.session_state[f"api_key_{provider}"] = api_key
+
+    update_models_clicked = provider_cols[4].button(
+        "Validar chave / Atualizar modelos",
+        use_container_width=True,
+    )
+
+    if update_models_clicked:
+        try:
+            fresh_models = fetch_models_for_provider(provider, api_key)
+            if not fresh_models:
+                raise RuntimeError("Nenhum modelo retornado para este provider.")
+            set_cached_models(provider, fresh_models)
+            st.session_state[f"model_selected_{provider}"] = fresh_models[0]
+            st.success(f"API validada. {len(fresh_models)} modelos carregados para {provider}.")
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Falha ao validar chave/modelos: {exc}")
+
+    provider_models = get_cached_models(provider)
+    if not provider_models:
+        provider_models = list(MODEL_OPTIONS.get(provider, []))
+
+    model_state_key = f"model_selected_{provider}"
+    if st.session_state.get(model_state_key) not in provider_models:
+        st.session_state[model_state_key] = provider_models[0] if provider_models else ""
+
+    selected_model = provider_cols[1].selectbox(
+        "Modelo",
+        provider_models,
+        key=model_state_key,
+    )
+    custom_model = provider_cols[2].text_input("Modelo custom", value="")
+    effective_model = custom_model.strip() or selected_model
 
     st.markdown('<div class="onco-toolbar">', unsafe_allow_html=True)
     st.markdown('<div class="onco-toolbar-title">Controles de Mineracao</div>', unsafe_allow_html=True)
@@ -899,6 +1048,12 @@ def main():
             if provider != "LLM Studio" and not api_key:
                 raise RuntimeError("API key obrigatoria para o provider selecionado.")
             parsed = test_ai_connection(provider, effective_model, api_key)
+            try:
+                refreshed = fetch_models_for_provider(provider, api_key)
+                if refreshed:
+                    set_cached_models(provider, refreshed)
+            except Exception:
+                pass
             st.success("Teste de IA concluido com sucesso.")
             st.json(parsed)
         except Exception as exc:
