@@ -42,6 +42,17 @@ ROW_BG_BY_URGENCY = {
     "BAIXA": "#143d31",
 }
 
+SPECIALTY_BUCKETS = [
+    "Neurologis",
+    "Cabeca e pescoco",
+    "Torax",
+    "Abdome e pelve urologia (medicina interna)",
+    "Gineclogico (utero/ovarios)",
+    "Mama (mama e axilas)",
+    "Obstetrico",
+    "Musculoesqueletico",
+]
+
 
 def init_model_cache():
     if "models_by_provider" not in st.session_state:
@@ -72,22 +83,24 @@ def set_cached_models(provider, models):
 
 def specialty_chip(name):
     key = ascii_fold(name).lower()
-    if "onco" in key:
-        return "🔴"
-    if "pneumo" in key:
+    if "neurolog" in key:
+        return "🧠"
+    if "cabeca" in key or "pescoco" in key:
+        return "🗣️"
+    if "torax" in key:
+        return "🫁"
+    if "abdome" in key or "pelve" in key or "urologia" in key:
         return "🟠"
-    if "uro" in key:
-        return "🟢"
-    if "gineco" in key or "obst" in key:
-        return "🟣"
+    if "gineclogico" in key:
+        return "🩺"
     if "mama" in key:
         return "🌸"
-    if "gastro" in key:
-        return "🔵"
-    if "orto" in key:
-        return "🟤"
-    if "otorrino" in key:
-        return "🟡"
+    if "obstetrico" in key:
+        return "🤰"
+    if "musculoesqueletico" in key:
+        return "🦴"
+    if "onco" in key:
+        return "🔴"
     return "⚪"
 
 
@@ -244,20 +257,31 @@ def infer_modality_fallback(text):
 
 
 def infer_specialty_fallback(text):
-    upper = ascii_fold(text).upper()
-    if any(t in upper for t in ["MAMA", "MAMARIO", "BIRADS"]):
-        return "Oncologia"
-    if any(t in upper for t in ["PULMAO", "TORAX", "NODULO PULMONAR"]):
-        return "Pneumologia"
-    if any(t in upper for t in ["PROSTATA", "PIRADS", "RIM", "RENAL"]):
-        return "Urologia"
-    if any(t in upper for t in ["UTERO", "OVARIO", "GINECO", "PELV"]):
-        return "Ginecologia"
-    if any(t in upper for t in ["FIGADO", "HEPAT", "PANCREAS", "ABDOMEN"]):
-        return "Gastroenterologia"
-    if any(t in upper for t in ["OSSO", "ORTOP", "MUSCULO"]):
-        return "Ortopedia"
-    return "Outro"
+    return canonical_specialty("", text)
+
+
+def canonical_specialty(raw_specialty, source_text=""):
+    text = ascii_fold(f"{raw_specialty} {source_text}").upper()
+
+    if any(t in text for t in ["OBST", "GESTA", "FETO", "PLACENTA", "GRAVID"]):
+        return "Obstetrico"
+    if any(t in text for t in ["MAMA", "MAMAR", "AXILA", "BIRADS", "BI-RADS"]):
+        return "Mama (mama e axilas)"
+    if any(t in text for t in ["UTERO", "OVARIO", "ENDOMET", "ADNEX", "GINECO", "ANEXIAL"]):
+        return "Gineclogico (utero/ovarios)"
+    if any(t in text for t in ["ENCEF", "CEREBR", "NEURO", "INTRACRAN", "CRANIO", "SNC"]):
+        return "Neurologis"
+    if any(t in text for t in ["PESCOCO", "LARING", "OROFAR", "NASO", "SEIOS PARANASAIS", "TIREOID", "MANDIB", "FACE"]):
+        return "Cabeca e pescoco"
+    if any(t in text for t in ["TORAX", "PULMAO", "PULMON", "MEDIAST", "PLEURA", "CARDIO", "MAMARIA INTERNA"]):
+        return "Torax"
+    if any(t in text for t in ["OSSO", "ARTIC", "MUSCUL", "TEND", "LIGAMENT", "COLUNA", "ORTOP", "ESQUELET"]):
+        return "Musculoesqueletico"
+    if any(t in text for t in ["ABDOM", "PELVE", "HEPAT", "FIGADO", "PANCREA", "RENAL", "RIM", "PROSTAT", "BEXIGA", "URO", "GASTRO", "INTEST", "BACO", "ADREN", "VESIC"]):
+        return "Abdome e pelve urologia (medicina interna)"
+
+    # Fallback para garantir somente os grupos definidos.
+    return "Abdome e pelve urologia (medicina interna)"
 
 
 def normalize_urgency(value):
@@ -402,6 +426,9 @@ def ai_system_prompt():
         "Campos obrigatorios: same_id, patient_name, age, last_exam_date, exam_modality, "
         "medical_specialty, tumor_findings, tumor_location, tumor_characteristics, "
         "malignancy_score, urgency_level, urgency_reason, is_eligible. "
+        "medical_specialty deve ser UMA destas opcoes: "
+        "Neurologis, Cabeca e pescoco, Torax, Abdome e pelve urologia (medicina interna), "
+        "Gineclogico (utero/ovarios), Mama (mama e axilas), Obstetrico, Musculoesqueletico. "
         "Regras: malignancy_score deve ser inteiro 0-5; urgency_level deve ser CRITICA, MUITO ALTA, ALTA, MODERADA ou BAIXA; "
         "is_eligible deve ser booleano. Se dado ausente, use string vazia."
     )
@@ -528,7 +555,8 @@ def normalize_ai_payload(ai_dict, source_text, file_name, provider, model):
     age = normalize_text(ai_dict.get("age")) or parse_age_fallback(source_text)
     last_exam_date = normalize_text(ai_dict.get("last_exam_date")) or parse_exam_date_fallback(source_text)
     exam_modality = normalize_text(ai_dict.get("exam_modality")) or infer_modality_fallback(source_text)
-    medical_specialty = normalize_text(ai_dict.get("medical_specialty")) or infer_specialty_fallback(source_text)
+    medical_specialty_raw = normalize_text(ai_dict.get("medical_specialty")) or infer_specialty_fallback(source_text)
+    medical_specialty = canonical_specialty(medical_specialty_raw, source_text)
     tumor_findings = normalize_text(ai_dict.get("tumor_findings"))
     tumor_location = normalize_text(ai_dict.get("tumor_location"))
     tumor_characteristics = normalize_text(ai_dict.get("tumor_characteristics"))
@@ -745,7 +773,13 @@ def build_results_dataframe(df, only_eligible):
     work["IDADE"] = work["age"].fillna("").astype(str)
     work["DATA EXAME"] = work["last_exam_date"].fillna("").astype(str)
     work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
-    work["ESPECIALIDADE"] = work["medical_specialty"].fillna("Outro").astype(str)
+    work["ESPECIALIDADE"] = work.apply(
+        lambda r: canonical_specialty(
+            r.get("medical_specialty", ""),
+            f"{r.get('tumor_findings', '')} {r.get('tumor_location', '')} {r.get('tumor_characteristics', '')} {r.get('exam_modality', '')}",
+        ),
+        axis=1,
+    )
     work["MODELO IA"] = work["ai_model"].fillna("").astype(str)
 
     cols = [
@@ -790,15 +824,17 @@ def render_specialty_tabs(df):
         return
 
     table_cols = ["URGENCIA", "SCORE MALIG.", "SAME", "NOME", "IDADE", "DATA EXAME", "MODALIDADE"]
-    specialty_counts = df["ESPECIALIDADE"].value_counts()
+    specialty_counts = df["ESPECIALIDADE"].value_counts().to_dict()
+    ordered_specialties = [name for name in SPECIALTY_BUCKETS if specialty_counts.get(name, 0) > 0]
+
     labels = ["⚪ Todos ({})".format(len(df))]
-    labels.extend([f"{specialty_chip(name)} {name} ({count})" for name, count in specialty_counts.items()])
+    labels.extend([f"{specialty_chip(name)} {name} ({specialty_counts.get(name, 0)})" for name in ordered_specialties])
     tabs = st.tabs(labels)
 
     with tabs[0]:
         render_clickable_patient_table(df, table_cols, "tab_all")
 
-    for idx, (name, _count) in enumerate(specialty_counts.items(), start=1):
+    for idx, name in enumerate(ordered_specialties, start=1):
         with tabs[idx]:
             filtered = df[df["ESPECIALIDADE"] == name].copy()
             render_clickable_patient_table(filtered, table_cols, f"tab_{idx}_{ascii_fold(name)}")
@@ -1374,8 +1410,11 @@ def main():
             metric_cols[i].metric(urg, count)
 
         if not display_df.empty:
-            sp_counts = display_df["ESPECIALIDADE"].value_counts().reset_index()
-            sp_counts.columns = ["Especialidade", "Pacientes"]
+            counts_map = display_df["ESPECIALIDADE"].value_counts().to_dict()
+            rows = []
+            for spec in SPECIALTY_BUCKETS:
+                rows.append({"Especialidade": spec, "Pacientes": int(counts_map.get(spec, 0))})
+            sp_counts = pd.DataFrame(rows)
             st.dataframe(sp_counts, use_container_width=True, hide_index=True)
 
     with tab_detalhado:
