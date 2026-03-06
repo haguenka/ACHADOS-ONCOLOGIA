@@ -1027,6 +1027,8 @@ def load_patients_from_db(db_path, mtime_token):
                 tumor_location,
                 tumor_characteristics,
                 urgency_reason,
+                convenio,
+                setor,
                 last_file,
                 context,
                 updated_at
@@ -1049,6 +1051,8 @@ def build_results_dataframe(df, only_eligible):
                 "IDADE",
                 "DATA EXAME",
                 "MODALIDADE",
+                "CONVENIO",
+                "SETOR",
                 "ESPECIALIDADE",
                 "MODELO IA",
             ]
@@ -1067,6 +1071,8 @@ def build_results_dataframe(df, only_eligible):
     work["IDADE"] = work["age"].fillna("").astype(str)
     work["DATA EXAME"] = work["last_exam_date"].apply(parse_exam_datetime)
     work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
+    work["CONVENIO"] = work["convenio"].fillna("").astype(str)
+    work["SETOR"] = work["setor"].fillna("").astype(str)
     work["ESPECIALIDADE"] = work.apply(
         lambda r: canonical_specialty(
             r.get("medical_specialty", ""),
@@ -1085,6 +1091,8 @@ def build_results_dataframe(df, only_eligible):
         "IDADE",
         "DATA EXAME",
         "MODALIDADE",
+        "CONVENIO",
+        "SETOR",
         "ESPECIALIDADE",
         "MODELO IA",
         "same_id",
@@ -1094,6 +1102,8 @@ def build_results_dataframe(df, only_eligible):
         "tumor_location",
         "tumor_characteristics",
         "urgency_reason",
+        "convenio",
+        "setor",
         "last_file",
         "context",
         "updated_at",
@@ -1119,7 +1129,7 @@ def render_specialty_tabs(df):
         st.info("Nenhum paciente minerado ainda.")
         return
 
-    table_cols = ["URGENCIA", "SCORE MALIG.", "SAME", "NOME", "IDADE", "DATA EXAME", "MODALIDADE"]
+    table_cols = ["URGENCIA", "SCORE MALIG.", "SAME", "NOME", "IDADE", "DATA EXAME", "MODALIDADE", "CONVENIO", "SETOR"]
     specialty_counts = df["ESPECIALIDADE"].value_counts().to_dict()
     ordered_specialties = [name for name in SPECIALTY_BUCKETS if specialty_counts.get(name, 0) > 0]
 
