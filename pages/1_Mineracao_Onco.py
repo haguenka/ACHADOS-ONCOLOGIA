@@ -248,10 +248,13 @@ def parse_exam_date_fallback(text):
     return format_exam_date(match.group(1)) if match else datetime.utcnow().strftime("%d/%m/%Y")
 
 
-def format_exam_date(value):
+def parse_exam_datetime(value):
+    if isinstance(value, pd.Timestamp):
+        return value.normalize()
+
     text = normalize_text(value)
     if not text:
-        return ""
+        return pd.NaT
 
     for fmt in (
         "%d/%m/%Y",
@@ -264,14 +267,21 @@ def format_exam_date(value):
         "%Y-%m-%d %H:%M",
     ):
         try:
-            return datetime.strptime(text, fmt).strftime("%d/%m/%Y")
+            return pd.Timestamp(datetime.strptime(text, fmt)).normalize()
         except ValueError:
             continue
 
     parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
     if pd.notna(parsed):
+        return pd.Timestamp(parsed).normalize()
+    return pd.NaT
+
+
+def format_exam_date(value):
+    parsed = parse_exam_datetime(value)
+    if pd.notna(parsed):
         return parsed.strftime("%d/%m/%Y")
-    return text
+    return normalize_text(value)
 
 
 def parse_age_fallback(text):
@@ -1053,7 +1063,7 @@ def build_results_dataframe(df, only_eligible):
     work["SAME"] = work["same_id"].fillna("").astype(str)
     work["NOME"] = work["patient_name"].fillna("").astype(str)
     work["IDADE"] = work["age"].fillna("").astype(str)
-    work["DATA EXAME"] = work["last_exam_date"].apply(format_exam_date)
+    work["DATA EXAME"] = work["last_exam_date"].apply(parse_exam_datetime)
     work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
     work["ESPECIALIDADE"] = work.apply(
         lambda r: canonical_specialty(
@@ -1063,6 +1073,7 @@ def build_results_dataframe(df, only_eligible):
         axis=1,
     )
     work["MODELO IA"] = work["ai_model"].fillna("").astype(str)
+    work = work.sort_values("DATA EXAME", ascending=False, na_position="last")
 
     cols = [
         "URGENCIA",
@@ -1097,6 +1108,7 @@ def style_patient_table(df):
 
     styler = df.style.apply(row_style, axis=1)
     styler = styler.set_properties(subset=["URGENCIA", "SCORE MALIG.", "SAME"], **{"font-weight": "700"})
+    styler = styler.format({"DATA EXAME": lambda value: format_exam_date(value)})
     return styler
 
 
@@ -1252,7 +1264,7 @@ def show_patient_detail_dialog(row):
                 <div class="detail-patient-meta">
                     <span>SAME: {esc(row.get('SAME'))}</span>
                     <span>Idade: {esc(row.get('IDADE'))}</span>
-                    <span>Data: {esc(row.get('DATA EXAME'))}</span>
+                    <span>Data: {esc(format_exam_date(row.get('DATA EXAME')))}</span>
                 </div>
             </div>
             """,
