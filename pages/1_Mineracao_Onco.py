@@ -845,7 +845,9 @@ def normalize_ai_payload(ai_dict, source_text, file_name, provider, model):
     same_id = normalize_text(ai_dict.get("same_id")) or parse_same_id_fallback(source_text)
     patient_name = normalize_text(ai_dict.get("patient_name")) or parse_patient_name_fallback(source_text)
     age = normalize_text(ai_dict.get("age")) or parse_age_fallback(source_text)
-    last_exam_date = normalize_text(ai_dict.get("last_exam_date")) or parse_exam_date_fallback(source_text)
+    last_exam_date = format_exam_date(
+        normalize_text(ai_dict.get("last_exam_date")) or parse_exam_date_fallback(source_text)
+    )
     exam_modality = normalize_text(ai_dict.get("exam_modality")) or infer_modality_fallback(source_text)
     medical_specialty_raw = normalize_text(ai_dict.get("medical_specialty")) or infer_specialty_fallback(source_text)
     medical_specialty = canonical_specialty(medical_specialty_raw, source_text)
@@ -973,7 +975,7 @@ def process_pdf_with_ai(uploaded_file, db_path, provider, model, api_key):
         "same": payload["same_id"],
         "nome": payload["patient_name"],
         "idade": payload["age"],
-        "data_exame": payload["last_exam_date"],
+        "data_exame": format_exam_date(payload["last_exam_date"]),
         "modalidade": payload["exam_modality"],
         "especialidade": payload["medical_specialty"],
         "modelo_ia": payload["ai_model"],
@@ -1706,6 +1708,8 @@ def main():
     if run_rows:
         st.subheader("Resumo da execucao")
         run_df = pd.DataFrame(run_rows)
+        if "data_exame" in run_df.columns:
+            run_df["data_exame"] = run_df["data_exame"].apply(format_exam_date)
         st.dataframe(run_df, use_container_width=True, hide_index=True)
         st.download_button(
             "Exportar resultados da execucao (CSV)",
