@@ -245,7 +245,33 @@ def parse_patient_name_fallback(text):
 
 def parse_exam_date_fallback(text):
     match = re.search(r"\b(\d{2}[\/\-]\d{2}[\/\-]\d{4})\b", text)
-    return match.group(1) if match else datetime.utcnow().strftime("%d/%m/%Y")
+    return format_exam_date(match.group(1)) if match else datetime.utcnow().strftime("%d/%m/%Y")
+
+
+def format_exam_date(value):
+    text = normalize_text(value)
+    if not text:
+        return ""
+
+    for fmt in (
+        "%d/%m/%Y",
+        "%d-%m-%Y",
+        "%d.%m.%Y",
+        "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+    ):
+        try:
+            return datetime.strptime(text, fmt).strftime("%d/%m/%Y")
+        except ValueError:
+            continue
+
+    parsed = pd.to_datetime(text, errors="coerce", dayfirst=True)
+    if pd.notna(parsed):
+        return parsed.strftime("%d/%m/%Y")
+    return text
 
 
 def parse_age_fallback(text):
@@ -1027,7 +1053,7 @@ def build_results_dataframe(df, only_eligible):
     work["SAME"] = work["same_id"].fillna("").astype(str)
     work["NOME"] = work["patient_name"].fillna("").astype(str)
     work["IDADE"] = work["age"].fillna("").astype(str)
-    work["DATA EXAME"] = work["last_exam_date"].fillna("").astype(str)
+    work["DATA EXAME"] = work["last_exam_date"].apply(format_exam_date)
     work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
     work["ESPECIALIDADE"] = work.apply(
         lambda r: canonical_specialty(
