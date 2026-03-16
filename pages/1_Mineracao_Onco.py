@@ -1364,6 +1364,16 @@ def render_clickable_patient_table(df, table_cols, table_key):
     view_df["DATA EXAME"] = view_df["DATA EXAME"].apply(format_exam_date)
     view_df.insert(0, "SELECIONAR", view_df["SAME"].astype(str) == selected_same)
 
+    action_cols = st.columns([1.2, 3])
+    if action_cols[0].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
+        if not selected_same:
+            st.warning("Selecione uma linha na tabela antes de abrir a analise detalhada.")
+        else:
+            st.session_state["detail_same_id"] = selected_same
+            st.session_state["open_detail_dialog"] = True
+            st.rerun()
+    action_cols[1].caption("Selecione a linha do paciente diretamente na tabela e abra os detalhes.")
+
     edited_df = st.data_editor(
         view_df,
         use_container_width=True,
@@ -1386,16 +1396,6 @@ def render_clickable_patient_table(df, table_cols, table_key):
 
     selected_same = normalize_text(selected_rows.iloc[0]["SAME"]) if not selected_rows.empty else ""
     st.session_state[f"{table_key}_selected_same"] = selected_same
-
-    action_cols = st.columns([1.2, 3])
-    if action_cols[0].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
-        if not selected_same:
-            st.warning("Selecione uma linha na tabela antes de abrir a analise detalhada.")
-        else:
-            st.session_state["detail_same_id"] = selected_same
-            st.session_state["open_detail_dialog"] = True
-            st.rerun()
-    action_cols[1].caption("Selecione a linha do paciente diretamente na tabela e abra os detalhes.")
 
 
 def extract_ai_field(ai_text, keys):
@@ -1605,45 +1605,49 @@ def render_css():
             margin-bottom: 6px;
         }
         [data-testid="stDialog"] > div[role="dialog"] {
-            width: min(96vw, 1500px) !important;
-            max-width: min(96vw, 1500px) !important;
+            width: min(98vw, 1820px) !important;
+            max-width: min(98vw, 1820px) !important;
+        }
+        [data-testid="stDialog"] > div[role="dialog"] > div {
+            max-width: none !important;
         }
         [data-baseweb="tab-list"] {
             gap: 6px;
             flex-wrap: wrap;
         }
         [data-baseweb="tab-list"] button {
-            border: 1px solid #3d4652 !important;
+            border: 1px solid #d8e1ea !important;
             border-radius: 8px 8px 0 0 !important;
-            background: #1c2430 !important;
-            color: #cdd7e1 !important;
+            background: #f4f7fb !important;
+            color: #425466 !important;
             padding: 6px 10px !important;
         }
         [data-baseweb="tab-list"] button[aria-selected="true"] {
-            border-color: #228be6 !important;
-            background: #0b2e57 !important;
-            color: #f1f3f5 !important;
+            border-color: #99c1de !important;
+            background: #e6f0f7 !important;
+            color: #102a43 !important;
         }
         .stButton > button[kind="primary"] {
-            background: linear-gradient(180deg, #d90429, #9d0208) !important;
-            border: 1px solid #ff4d6d !important;
-            color: #fff5f5 !important;
+            background: linear-gradient(180deg, #d8eefe, #bfdcf2) !important;
+            border: 1px solid #94b6d6 !important;
+            color: #16324f !important;
             font-weight: 700 !important;
         }
         .stButton > button[kind="primary"]:hover {
-            background: linear-gradient(180deg, #ef233c, #c1121f) !important;
+            background: linear-gradient(180deg, #e8f4ff, #cfe7fa) !important;
         }
         .detail-header-block {
-            background: linear-gradient(180deg, #27241f, #221f1a);
-            border: 1px solid #3a332b;
-            border-radius: 10px;
-            padding: 12px 14px;
-            margin-bottom: 8px;
+            background: linear-gradient(135deg, #f7efe7, #eef6f7);
+            border: 1px solid #d8e3e8;
+            border-radius: 16px;
+            padding: 16px 18px;
+            margin-bottom: 10px;
+            box-shadow: 0 10px 26px rgba(15, 23, 42, 0.10);
         }
         .detail-patient-name {
             font-size: clamp(34px, 3.6vw, 52px);
             font-weight: 900;
-            color: #f1f3f5;
+            color: #14202b;
             line-height: 1.05;
             margin-bottom: 8px;
             word-break: break-word;
@@ -1652,8 +1656,8 @@ def render_css():
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
-            color: #ced4da;
-            font-size: 15px;
+            color: #506273;
+            font-size: 16px;
             font-weight: 600;
         }
         .detail-side-stack {
@@ -1662,65 +1666,67 @@ def render_css():
             gap: 8px;
         }
         .detail-side-card {
-            background: linear-gradient(180deg, #2b2214, #1f1b16);
-            border: 2px solid #5c4c2a;
-            border-radius: 10px;
-            padding: 8px;
+            background: linear-gradient(135deg, #f8f4ef, #eff5fb);
+            border: 1px solid #d9e2ea;
+            border-radius: 16px;
+            padding: 12px 10px;
             text-align: center;
+            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
         }
         .detail-side-title {
             font-size: 12px;
             font-weight: 800;
-            color: #ffa94d;
+            color: #6b7280;
             letter-spacing: 0.5px;
             margin-bottom: 3px;
         }
         .detail-side-value {
             font-size: clamp(22px, 2.3vw, 34px);
             font-weight: 900;
-            color: #ffe066;
+            color: #1f2937;
             line-height: 1.05;
         }
         .detail-side-stars {
             font-size: clamp(16px, 1.6vw, 26px);
             letter-spacing: 1px;
-            color: #ff6b6b;
+            color: #d97706;
             margin: 2px 0;
         }
         .detail-main-panel {
-            background: linear-gradient(180deg, #071a2f, #051224);
-            border: 1px solid #173a63;
-            border-radius: 10px;
-            padding: 14px;
+            background: linear-gradient(180deg, #f8fbfd, #edf3f7);
+            border: 1px solid #d8e2ea;
+            border-radius: 16px;
+            padding: 18px;
             margin-bottom: 10px;
-            max-height: 50vh;
+            max-height: 58vh;
             overflow-y: auto;
         }
         .detail-panel-title {
             font-size: clamp(28px, 3vw, 42px);
             font-weight: 900;
-            color: #f1f3f5;
-            margin-bottom: 10px;
+            color: #12324a;
+            margin-bottom: 14px;
         }
         .detail-section {
-            background: rgba(2, 28, 60, 0.55);
-            border: 1px solid #123c6d;
-            border-radius: 8px;
-            padding: 10px;
-            margin-bottom: 9px;
+            background: rgba(255, 255, 255, 0.78);
+            border: 1px solid #d7e3ea;
+            border-radius: 14px;
+            padding: 14px;
+            margin-bottom: 12px;
         }
         .detail-section-title {
             font-size: clamp(20px, 2.1vw, 30px);
             font-weight: 900;
-            margin-bottom: 6px;
-            color: #4dabf7;
+            margin-bottom: 8px;
+            color: #34699a;
             line-height: 1.1;
         }
         .detail-line, .detail-content {
-            color: #dee2e6;
+            color: #1f2937;
             font-size: clamp(17px, 1.5vw, 24px);
-            line-height: 1.35;
-            margin-bottom: 2px;
+            line-height: 1.5;
+            margin-bottom: 4px;
+            word-break: break-word;
         }
         </style>
         """,
