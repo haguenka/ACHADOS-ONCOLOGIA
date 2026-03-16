@@ -294,40 +294,19 @@ def main():
     st.caption("Fonte: tabela patients do app pdf_tumor_findings_miner.py")
 
     candidates = default_db_candidates()
-    suggested_path = str(candidates[0]) if candidates else "tumor_findings_patients.db"
+    db_path = str(candidates[0]) if candidates else "tumor_findings_patients.db"
 
     st.sidebar.header("Configuracao")
-    db_path = st.sidebar.text_input("DB_PATH (SQLite)", value=suggested_path)
     only_eligible = st.sidebar.checkbox("Somente elegiveis", value=False)
 
     if st.sidebar.button("Recarregar dados"):
         st.cache_data.clear()
 
-    if not db_path:
-        st.error("Informe o caminho do banco SQLite.")
-        return
-
     if not os.path.exists(db_path):
         st.error(
-            "Banco nao encontrado. Ajuste DB_PATH no painel da esquerda "
-            "ou configure a variavel DB_PATH no Render. "
-            "Voce tambem pode inicializar dados na pagina Mineracao Onco."
+            "Banco nao encontrado no caminho configurado pela aplicacao. "
+            "Inicialize ou substitua o banco na pagina Mineracao Onco."
         )
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Inicializar banco")
-        uploaded_db = st.sidebar.file_uploader(
-            "Upload do arquivo SQLite",
-            type=["db", "sqlite", "sqlite3"],
-            accept_multiple_files=False,
-        )
-        if uploaded_db is not None and st.sidebar.button("Salvar banco em DB_PATH"):
-            error = save_uploaded_db(uploaded_db, db_path)
-            if error:
-                st.sidebar.error(error)
-            else:
-                st.sidebar.success("Banco salvo com sucesso. Recarregando...")
-                st.cache_data.clear()
-                st.rerun()
         st.stop()
 
     try:
@@ -335,22 +314,6 @@ def main():
         raw_df = load_patients_from_db(db_path, mtime)
     except Exception as exc:
         st.error(f"Erro ao ler banco: {exc}")
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Substituir banco")
-        uploaded_db = st.sidebar.file_uploader(
-            "Upload do arquivo SQLite",
-            type=["db", "sqlite", "sqlite3"],
-            accept_multiple_files=False,
-            key="replace_db",
-        )
-        if uploaded_db is not None and st.sidebar.button("Substituir banco em DB_PATH"):
-            error = save_uploaded_db(uploaded_db, db_path)
-            if error:
-                st.sidebar.error(error)
-            else:
-                st.sidebar.success("Banco substituido. Recarregando...")
-                st.cache_data.clear()
-                st.rerun()
         st.stop()
 
     df = build_dataframe(raw_df)
