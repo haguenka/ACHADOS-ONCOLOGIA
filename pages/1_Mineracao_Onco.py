@@ -1752,7 +1752,7 @@ def main():
     render_css()
 
     st.markdown(
-        '<div style="color:#8ce99a; font-weight:700; letter-spacing:0.3px; margin-bottom:0.25rem;">ACSC-CSSJ/Grupo Oncoclinicas</div>',
+        '<div style="color:#8ce99a; font-weight:800; font-size:2.1rem; line-height:1.1; letter-spacing:0.3px; margin-bottom:0.45rem;">ACSC-CSSJ/Grupo Oncoclinicas</div>',
         unsafe_allow_html=True,
     )
     st.title("Minerador de Achados Oncológicos - CDI")
