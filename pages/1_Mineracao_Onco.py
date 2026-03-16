@@ -169,12 +169,14 @@ def default_app_settings():
                 "password_hash": hash_password(os.getenv("ONCO_ADMIN_PASSWORD", "admin123")),
                 "role": "admin",
                 "label": "Administrador",
+                "aliases": ["admin", "administrador", "admin123"],
             },
             "common": {
                 "username": "usuario",
                 "password_hash": hash_password(os.getenv("ONCO_COMMON_PASSWORD", "usuario123")),
                 "role": "common",
                 "label": "Usuario comum",
+                "aliases": ["usuario", "usuario123", "comum"],
             },
         },
         "admin_runtime": {
@@ -247,7 +249,10 @@ def authenticate_user(settings, username, password):
     username_norm = normalize_text(username).lower()
     password_hash = hash_password(password)
     for user in settings.get("users", {}).values():
-        if normalize_text(user.get("username")).lower() != username_norm:
+        aliases = [normalize_text(user.get("username")).lower()]
+        aliases.extend(normalize_text(alias).lower() for alias in user.get("aliases", []))
+        aliases = [alias for alias in aliases if alias]
+        if username_norm not in aliases:
             continue
         if normalize_text(user.get("password_hash")) != password_hash:
             return None
@@ -1746,7 +1751,11 @@ def test_ai_connection(provider, model, api_key):
 def main():
     render_css()
 
-    st.title("Minerador de Achados Suspeitos de Tumor")
+    st.markdown(
+        '<div style="color:#8ce99a; font-weight:700; letter-spacing:0.3px; margin-bottom:0.25rem;">ACSC-CSSJ/Grupo Oncoclinicas</div>',
+        unsafe_allow_html=True,
+    )
+    st.title("Minerador de Achados Oncológicos - CDI")
     st.caption("Mineracao com IA + lista de pacientes minerados por especialidade no mesmo banco do dashboard.")
     default_db_path = st.session_state.get("selected_db_path", get_db_path())
     auth_user = render_login_screen(default_db_path)
