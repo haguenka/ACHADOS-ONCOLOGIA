@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import sqlite3
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 
 
@@ -24,6 +26,12 @@ URGENCY_COLORS = {
     "ALTA": "#f59e0b",
     "MODERADA": "#10b981",
     "BAIXA": "#6b7280",
+}
+APP_SETTINGS_FILENAME = "onco_app_settings.json"
+PROVIDER_BASE_URLS = {
+    "OpenAI": "https://api.openai.com/v1",
+    "DeepSeek": "https://api.deepseek.com",
+    "LLM Studio": os.getenv("LLM_STUDIO_BASE_URL", "http://127.0.0.1:1234/v1"),
 }
 
 
@@ -119,6 +127,185 @@ def default_db_candidates():
         candidates.append(Path(env_db))
     candidates.extend([local_db, parent_db])
     return candidates
+
+
+def get_app_settings_path(db_path):
+    return Path(db_path).expanduser().resolve().parent / APP_SETTINGS_FILENAME
+
+
+def load_app_settings(db_path):
+    settings_path = get_app_settings_path(db_path)
+    if not settings_path.exists():
+        return {}
+    try:
+        return json.loads(settings_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def get_dashboard_ai_config(db_path):
+    settings = load_app_settings(db_path)
+    config = settings.get("common_ai_config", {}) or {}
+    provider = normalize_text(config.get("provider"))
+    model = normalize_text(config.get("model"))
+    api_key = normalize_text(config.get("api_key"))
+    configured_at = normalize_text(config.get("configured_at"))
+    configured_by = normalize_text(config.get("configured_by"))
+    return {
+        "provider": provider,
+        "model": model,
+        "api_key": api_key,
+        "configured_at": configured_at,
+        "configured_by": configured_by,
+    }
+
+
+def call_openai_compatible(base_url, api_key, model, prompt):
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "Voce gera resumos gerenciais objetivos em portugues do Brasil."},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+
+    response = requests.post(
+        f"{base_url.rstrip('/')}/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=90,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return normalize_text(data["choices"][0]["message"]["content"])
+
+
+def call_gemini(api_key, model, prompt):
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        f"?key={api_key}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2},
+    }
+    response = requests.post(endpoint, json=payload, timeout=90)
+    response.raise_for_status()
+    data = response.json()
+    candidates = data.get("candidates", [])
+    if not candidates:
+        return ""
+    parts = candidates[0].get("content", {}).get("parts", [])
+    return "\n".join(normalize_text(part.get("text")) for part in parts if isinstance(part, dict)).strip()
+
+
+def build_dashboard_summary_payload(df, data_df, total_patients, total_eligible, eligible_rate, avg_score, high_risk):
+    urgency_counts = count_series(data_df, "urgency_final")
+    top_specialties = count_series(data_df, "specialty_final").head(5).to_dict()
+    top_modalities = count_series(data_df, "modality_final").head(5).to_dict()
+    top_convenios = count_series(data_df, "convenio").head(5).to_dict()
+    top_setores = count_series(data_df, "setor").head(5).to_dict()
+
+    return {
+        "total_pacientes_banco": int(total_patients),
+        "total_elegiveis_banco": int(total_eligible),
+        "taxa_elegibilidade_banco": round(float(eligible_rate), 1),
+        "registros_visualizacao_atual": int(len(data_df)),
+        "score_medio_visualizacao": round(float(avg_score), 1),
+        "alto_risco_score_maior_igual_4": int(high_risk),
+        "urgencia": {key: int(value) for key, value in urgency_counts.to_dict().items()},
+        "top_especialidades": {key: int(value) for key, value in top_specialties.items()},
+        "top_modalidades": {key: int(value) for key, value in top_modalities.items()},
+        "top_convenios": {key: int(value) for key, value in top_convenios.items()},
+        "top_setores": {key: int(value) for key, value in top_setores.items()},
+    }
+
+
+def fallback_operational_summary(summary_payload):
+    urg = summary_payload.get("urgencia", {})
+    top_specs = summary_payload.get("top_especialidades", {})
+    top_mods = summary_payload.get("top_modalidades", {})
+    top_convs = summary_payload.get("top_convenios", {})
+    top_sets = summary_payload.get("top_setores", {})
+
+    def first_label(data):
+        return next(iter(data.items())) if data else ("Nao informado", 0)
+
+    spec_name, spec_total = first_label(top_specs)
+    mod_name, mod_total = first_label(top_mods)
+    conv_name, conv_total = first_label(top_convs)
+    setor_name, setor_total = first_label(top_sets)
+
+    return (
+        f"- Base analisada: {summary_payload['registros_visualizacao_atual']} registros na visualizacao atual e "
+        f"{summary_payload['total_elegiveis_banco']} elegiveis no banco.\n"
+        f"- Taxa de elegibilidade global: {summary_payload['taxa_elegibilidade_banco']}%.\n"
+        f"- Pacientes de alto risco (score >= 4): {summary_payload['alto_risco_score_maior_igual_4']}.\n"
+        f"- Especialidade com maior volume: {spec_name} ({spec_total}).\n"
+        f"- Modalidade predominante: {mod_name} ({mod_total}).\n"
+        f"- Maior concentracao operacional atual: convenio {conv_name} ({conv_total}) e setor {setor_name} ({setor_total}).\n"
+        f"- Distribuicao de urgencia: {', '.join(f'{k} {v}' for k, v in urg.items()) if urg else 'sem dados relevantes'}."
+    )
+
+
+def generate_operational_summary_with_ai(db_path, summary_payload):
+    ai_config = get_dashboard_ai_config(db_path)
+    provider = ai_config.get("provider")
+    model = ai_config.get("model")
+    api_key = ai_config.get("api_key")
+
+    if not provider or not model:
+        return fallback_operational_summary(summary_payload), "Resumo local", ai_config
+    if provider != "LLM Studio" and not api_key:
+        return fallback_operational_summary(summary_payload), "Resumo local", ai_config
+
+    prompt = (
+        "Gere um resumo operacional/gerencial executivo em portugues do Brasil para um dashboard de achados oncologicos.\n"
+        "Regras:\n"
+        "- Use somente os dados agregados fornecidos.\n"
+        "- Nao cite nomes de pacientes, exemplos individuais nem dados sensiveis.\n"
+        "- Estruture em 5 a 7 bullets curtos.\n"
+        "- Traga leitura operacional, gargalos provaveis, prioridades e uma recomendacao de gestao.\n\n"
+        f"DADOS AGREGADOS:\n{json.dumps(summary_payload, ensure_ascii=False, indent=2)}"
+    )
+
+    try:
+        if provider == "Gemini":
+            summary = call_gemini(api_key, model, prompt)
+        else:
+            summary = call_openai_compatible(PROVIDER_BASE_URLS[provider], api_key, model, prompt)
+        summary = normalize_text(summary)
+        if not summary:
+            raise RuntimeError("Resumo vazio retornado pela IA.")
+        return summary, f"{provider} / {model}", ai_config
+    except Exception:
+        return fallback_operational_summary(summary_payload), "Resumo local", ai_config
+
+
+def get_cached_dashboard_summary(db_path, summary_payload, only_eligible):
+    ai_config = get_dashboard_ai_config(db_path)
+    cache_key_payload = {
+        "db_path": str(db_path),
+        "only_eligible": bool(only_eligible),
+        "summary_payload": summary_payload,
+        "provider": ai_config.get("provider"),
+        "model": ai_config.get("model"),
+        "configured_at": ai_config.get("configured_at"),
+    }
+    fingerprint = json.dumps(cache_key_payload, ensure_ascii=False, sort_keys=True)
+    cache_bucket = st.session_state.setdefault("dashboard_ai_summary_cache", {})
+    cached = cache_bucket.get(fingerprint)
+    if cached:
+        return cached
+
+    generated = generate_operational_summary_with_ai(db_path, summary_payload)
+    cache_bucket[fingerprint] = generated
+    return generated
 
 
 def save_uploaded_db(uploaded_file, db_path):
@@ -221,7 +408,7 @@ def count_series(df, column):
     if column not in df.columns:
         return pd.Series(dtype="int64")
     data = df[column].fillna("").astype(str).str.strip()
-    data = data[(data != "") & (~data.str.upper().isin(["NULL", "NONE", "N/A"]))]
+    data = data[(data != "") & (~data.str.upper().isin(["NULL", "NONE", "N/A", "NAN"]))]
     return data.value_counts()
 
 
@@ -290,7 +477,7 @@ def plot_plan_vs_urgency(df):
 
 
 def main():
-    st.title("Dashboard Oncologico - Tumor Findings Miner")
+    st.title("Dashboard Linha de Cuidados - Achados Oncológicos CDI")
     st.caption("Fonte: tabela patients do app pdf_tumor_findings_miner.py")
 
     candidates = default_db_candidates()
@@ -349,27 +536,28 @@ def main():
 
     plot_plan_vs_urgency(data_df)
 
-    st.subheader("Resumo")
-    st.write(
-        f"Pacientes alto risco (score >= 4): **{high_risk}** "
-        f"| Registros na visualizacao atual: **{len(data_df)}**"
+    st.subheader("Resumo Operacional/Gerencial")
+    summary_payload = build_dashboard_summary_payload(
+        df=df,
+        data_df=data_df,
+        total_patients=total_patients,
+        total_eligible=total_eligible,
+        eligible_rate=eligible_rate,
+        avg_score=avg_score,
+        high_risk=high_risk,
     )
+    summary_text, summary_source, ai_config = get_cached_dashboard_summary(db_path, summary_payload, only_eligible)
 
-    with st.expander("Visualizar dados (amostra)"):
-        cols = [
-            "same_id",
-            "patient_name",
-            "eligible_bool",
-            "specialty_final",
-            "modality_final",
-            "urgency_final",
-            "malignancy_score_final",
-            "convenio",
-            "setor",
-            "updated_at",
-        ]
-        cols = [c for c in cols if c in data_df.columns]
-        st.dataframe(data_df[cols].head(500), use_container_width=True, hide_index=True)
+    st.caption(
+        "Gerado por: "
+        f"{summary_source}"
+        + (
+            f" | Configurado em {ai_config.get('configured_at')}"
+            if normalize_text(ai_config.get("configured_at"))
+            else ""
+        )
+    )
+    st.markdown(summary_text.replace("\n", "  \n"))
 
 
 if __name__ == "__main__":
