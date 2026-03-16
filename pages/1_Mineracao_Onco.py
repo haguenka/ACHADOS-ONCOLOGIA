@@ -1359,49 +1359,43 @@ def render_clickable_patient_table(df, table_cols, table_key):
         st.info("Sem pacientes nesta aba.")
         return
 
-    open_labels = []
-    open_same_by_label = {}
-    for _, row in df.head(1000).iterrows():
-        same = normalize_text(row.get("SAME"))
-        nome = normalize_text(row.get("NOME"))
-        urg = normalize_text(row.get("URGENCIA"))
-        label = f"{nome} | SAME {same} | {urg}"
-        open_labels.append(label)
-        open_same_by_label[label] = normalize_text(row.get("same_id"))
-
-    if not open_labels:
-        st.info("Sem pacientes para selecao.")
-        return
-
-    cols = st.columns([4, 1, 3])
-    selected_label = cols[0].selectbox(
-        "Selecionar linha do paciente",
-        open_labels,
-        key=f"{table_key}_open_select",
-    )
-    selected_same = open_same_by_label.get(selected_label, "")
-    st.session_state[f"{table_key}_selected_same"] = selected_same
-
-    if cols[1].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
-        same_id = selected_same
-        if same_id:
-            st.session_state["detail_same_id"] = same_id
-            st.session_state["open_detail_dialog"] = True
-            st.rerun()
-    cols[2].caption("Use o seletor acima e abra os detalhes.")
-
     view_df = df[table_cols].copy()
-    marker_col = []
-    for _, row in view_df.iterrows():
-        marker_col.append("▶" if normalize_text(row.get("SAME")) == selected_same else "")
-    view_df.insert(0, "SEL", marker_col)
+    selected_same = normalize_text(st.session_state.get(f"{table_key}_selected_same"))
+    view_df["DATA EXAME"] = view_df["DATA EXAME"].apply(format_exam_date)
+    view_df.insert(0, "SELECIONAR", view_df["SAME"].astype(str) == selected_same)
 
-    st.dataframe(
-        style_patient_table(view_df),
+    edited_df = st.data_editor(
+        view_df,
         use_container_width=True,
         height=620,
         hide_index=True,
+        disabled=table_cols,
+        num_rows="fixed",
+        column_config={
+            "SELECIONAR": st.column_config.CheckboxColumn(
+                "SEL",
+                help="Marque a linha do paciente para abrir a analise detalhada.",
+                default=False,
+            )
+        },
     )
+
+    selected_rows = edited_df[edited_df["SELECIONAR"]]
+    if len(selected_rows) > 1:
+        st.info("Mais de uma linha foi marcada. O sistema usara apenas a primeira.")
+
+    selected_same = normalize_text(selected_rows.iloc[0]["SAME"]) if not selected_rows.empty else ""
+    st.session_state[f"{table_key}_selected_same"] = selected_same
+
+    action_cols = st.columns([1.2, 3])
+    if action_cols[0].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
+        if not selected_same:
+            st.warning("Selecione uma linha na tabela antes de abrir a analise detalhada.")
+        else:
+            st.session_state["detail_same_id"] = selected_same
+            st.session_state["open_detail_dialog"] = True
+            st.rerun()
+    action_cols[1].caption("Selecione a linha do paciente diretamente na tabela e abra os detalhes.")
 
 
 def extract_ai_field(ai_text, keys):
