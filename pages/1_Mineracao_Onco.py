@@ -1469,7 +1469,7 @@ def show_patient_detail_dialog(row):
     urgency_reason = normalize_text(row.get("urgency_reason")) or "Nao informado."
     model_ia = normalize_text(row.get("MODELO IA")) or "Nao informado."
 
-    top_cols = st.columns([4.5, 1.2])
+    top_cols = st.columns([6.2, 1.4])
     with top_cols[0]:
         st.markdown(
             f"""
@@ -1604,50 +1604,53 @@ def render_css():
             font-size: 14px;
             margin-bottom: 6px;
         }
-        [data-testid="stDialog"] > div[role="dialog"] {
-            width: min(98vw, 1820px) !important;
-            max-width: min(98vw, 1820px) !important;
+        [data-testid="stDialog"] div[role="dialog"] {
+            width: min(99vw, 2100px) !important;
+            max-width: min(99vw, 2100px) !important;
         }
-        [data-testid="stDialog"] > div[role="dialog"] > div {
+        [data-testid="stDialog"] div[role="dialog"] > div {
             max-width: none !important;
+        }
+        [data-testid="stDialog"] [data-testid="stHorizontalBlock"] {
+            align-items: flex-start;
         }
         [data-baseweb="tab-list"] {
             gap: 6px;
             flex-wrap: wrap;
         }
         [data-baseweb="tab-list"] button {
-            border: 1px solid #d8e1ea !important;
+            border: 1px solid #2f3c4b !important;
             border-radius: 8px 8px 0 0 !important;
-            background: #f4f7fb !important;
-            color: #425466 !important;
+            background: #141b24 !important;
+            color: #b8c7d6 !important;
             padding: 6px 10px !important;
         }
         [data-baseweb="tab-list"] button[aria-selected="true"] {
-            border-color: #99c1de !important;
-            background: #e6f0f7 !important;
-            color: #102a43 !important;
+            border-color: #4f86c6 !important;
+            background: linear-gradient(180deg, #1b3044, #152635) !important;
+            color: #eef6ff !important;
         }
         .stButton > button[kind="primary"] {
-            background: linear-gradient(180deg, #d8eefe, #bfdcf2) !important;
-            border: 1px solid #94b6d6 !important;
-            color: #16324f !important;
+            background: linear-gradient(180deg, #2b4c68, #20384d) !important;
+            border: 1px solid #5f89ad !important;
+            color: #edf6ff !important;
             font-weight: 700 !important;
         }
         .stButton > button[kind="primary"]:hover {
-            background: linear-gradient(180deg, #e8f4ff, #cfe7fa) !important;
+            background: linear-gradient(180deg, #33597a, #27445d) !important;
         }
         .detail-header-block {
-            background: linear-gradient(135deg, #f7efe7, #eef6f7);
-            border: 1px solid #d8e3e8;
+            background: linear-gradient(135deg, #18222d, #111a23);
+            border: 1px solid #2a3948;
             border-radius: 16px;
             padding: 16px 18px;
             margin-bottom: 10px;
-            box-shadow: 0 10px 26px rgba(15, 23, 42, 0.10);
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
         }
         .detail-patient-name {
-            font-size: clamp(34px, 3.6vw, 52px);
+            font-size: clamp(28px, 2.6vw, 44px);
             font-weight: 900;
-            color: #14202b;
+            color: #f3f7fb;
             line-height: 1.05;
             margin-bottom: 8px;
             word-break: break-word;
@@ -1656,7 +1659,7 @@ def render_css():
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
-            color: #506273;
+            color: #9fb3c8;
             font-size: 16px;
             font-weight: 600;
         }
@@ -1666,35 +1669,35 @@ def render_css():
             gap: 8px;
         }
         .detail-side-card {
-            background: linear-gradient(135deg, #f8f4ef, #eff5fb);
-            border: 1px solid #d9e2ea;
+            background: linear-gradient(135deg, #1b2631, #131d27);
+            border: 1px solid #31485d;
             border-radius: 16px;
             padding: 12px 10px;
             text-align: center;
-            box-shadow: 0 8px 22px rgba(15, 23, 42, 0.08);
+            box-shadow: 0 12px 26px rgba(0, 0, 0, 0.22);
         }
         .detail-side-title {
             font-size: 12px;
             font-weight: 800;
-            color: #6b7280;
+            color: #8fa9c2;
             letter-spacing: 0.5px;
             margin-bottom: 3px;
         }
         .detail-side-value {
             font-size: clamp(22px, 2.3vw, 34px);
             font-weight: 900;
-            color: #1f2937;
+            color: #eef6ff;
             line-height: 1.05;
         }
         .detail-side-stars {
             font-size: clamp(16px, 1.6vw, 26px);
             letter-spacing: 1px;
-            color: #d97706;
+            color: #f4b860;
             margin: 2px 0;
         }
         .detail-main-panel {
-            background: linear-gradient(180deg, #f8fbfd, #edf3f7);
-            border: 1px solid #d8e2ea;
+            background: linear-gradient(180deg, #111922, #0d141c);
+            border: 1px solid #263544;
             border-radius: 16px;
             padding: 18px;
             margin-bottom: 10px;
@@ -1704,12 +1707,12 @@ def render_css():
         .detail-panel-title {
             font-size: clamp(28px, 3vw, 42px);
             font-weight: 900;
-            color: #12324a;
+            color: #edf6ff;
             margin-bottom: 14px;
         }
         .detail-section {
-            background: rgba(255, 255, 255, 0.78);
-            border: 1px solid #d7e3ea;
+            background: linear-gradient(180deg, rgba(31, 45, 58, 0.92), rgba(22, 33, 43, 0.92));
+            border: 1px solid #324657;
             border-radius: 14px;
             padding: 14px;
             margin-bottom: 12px;
@@ -1718,11 +1721,11 @@ def render_css():
             font-size: clamp(20px, 2.1vw, 30px);
             font-weight: 900;
             margin-bottom: 8px;
-            color: #34699a;
+            color: #8fc1ff;
             line-height: 1.1;
         }
         .detail-line, .detail-content {
-            color: #1f2937;
+            color: #e3edf8;
             font-size: clamp(17px, 1.5vw, 24px);
             line-height: 1.5;
             margin-bottom: 4px;
