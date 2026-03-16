@@ -1,5 +1,6 @@
 import json
 import html
+import hashlib
 import os
 import re
 import sqlite3
@@ -64,6 +65,8 @@ EXCEL_CONVENIO_CANDIDATES = ["convenio", "plano_convenio"]
 EXCEL_TELEFONE_CANDIDATES = ["telefone", "fone", "tel", "celular"]
 EXCEL_SETOR_CANDIDATES = ["setor", "tipo_atendimento", "setor_executante", "departamento"]
 EXCEL_SAME_CANDIDATES = ["same", "same_id", "sameid"]
+APP_SETTINGS_FILENAME = "onco_app_settings.json"
+CORRELATION_UPLOAD_STEM = "convenios_correlation_source"
 
 
 def init_model_cache():
@@ -136,6 +139,206 @@ def get_db_path():
     if env_path:
         return env_path
     return str(Path.cwd() / "tumor_findings_patients.db")
+
+
+def hash_password(password):
+    return hashlib.sha256(normalize_text(password).encode("utf-8")).hexdigest()
+
+
+def now_display():
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
+
+def get_app_storage_dir(db_path):
+    return Path(db_path).expanduser().resolve().parent
+
+
+def get_app_settings_path(db_path):
+    return get_app_storage_dir(db_path) / APP_SETTINGS_FILENAME
+
+
+def default_app_settings():
+    default_provider = "OpenAI"
+    default_model = MODEL_OPTIONS[default_provider][0]
+    env_key = PROVIDER_ENV_KEYS.get(default_provider, "")
+    default_api_key = os.getenv(env_key, "") if env_key else ""
+    return {
+        "users": {
+            "admin": {
+                "username": "admin",
+                "password_hash": hash_password(os.getenv("ONCO_ADMIN_PASSWORD", "admin123")),
+                "role": "admin",
+                "label": "Administrador",
+            },
+            "common": {
+                "username": "usuario",
+                "password_hash": hash_password(os.getenv("ONCO_COMMON_PASSWORD", "usuario123")),
+                "role": "common",
+                "label": "Usuario comum",
+            },
+        },
+        "admin_runtime": {
+            "provider": default_provider,
+            "api_key": default_api_key,
+            "validated_at": "",
+            "available_models": {},
+        },
+        "common_ai_config": {
+            "provider": default_provider,
+            "model": default_model,
+            "api_key": default_api_key,
+            "configured_at": "",
+            "configured_by": "",
+        },
+        "correlation": {
+            "stored_excel_path": "",
+            "original_name": "",
+            "uploaded_at": "",
+            "uploaded_by": "",
+            "threshold": 70,
+        },
+    }
+
+
+def merge_settings_with_defaults(current, defaults):
+    if not isinstance(current, dict):
+        return defaults
+
+    merged = {}
+    for key, default_value in defaults.items():
+        current_value = current.get(key)
+        if isinstance(default_value, dict):
+            merged[key] = merge_settings_with_defaults(current_value, default_value)
+        else:
+            merged[key] = current_value if current_value not in (None, "") else default_value
+
+    for key, value in current.items():
+        if key not in merged:
+            merged[key] = value
+    return merged
+
+
+def load_app_settings(db_path):
+    settings_path = get_app_settings_path(db_path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    defaults = default_app_settings()
+
+    if settings_path.exists():
+        try:
+            loaded = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            loaded = {}
+    else:
+        loaded = {}
+
+    settings = merge_settings_with_defaults(loaded, defaults)
+    if settings != loaded:
+        save_app_settings(db_path, settings)
+    return settings
+
+
+def save_app_settings(db_path, settings):
+    settings_path = get_app_settings_path(db_path)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def authenticate_user(settings, username, password):
+    username_norm = normalize_text(username).lower()
+    password_hash = hash_password(password)
+    for user in settings.get("users", {}).values():
+        if normalize_text(user.get("username")).lower() != username_norm:
+            continue
+        if normalize_text(user.get("password_hash")) != password_hash:
+            return None
+        return {
+            "username": user.get("username", ""),
+            "role": user.get("role", "common"),
+            "label": user.get("label", user.get("username", "")),
+        }
+    return None
+
+
+def init_auth_state():
+    if "auth_user" not in st.session_state:
+        st.session_state["auth_user"] = None
+
+
+def render_login_screen(db_path):
+    init_auth_state()
+    if st.session_state.get("auth_user"):
+        return st.session_state["auth_user"]
+
+    settings = load_app_settings(db_path)
+    left, center, right = st.columns([1.2, 1.4, 1.2])
+    with center:
+        st.markdown("### Login")
+        with st.form("onco_login_form", clear_on_submit=False):
+            username = st.text_input("Usuario")
+            password = st.text_input("Senha", type="password")
+            submitted = st.form_submit_button("Entrar", use_container_width=True)
+
+        if submitted:
+            user = authenticate_user(settings, username, password)
+            if user is None:
+                st.error("Usuario ou senha invalidos.")
+            else:
+                st.session_state["auth_user"] = user
+                st.rerun()
+
+    st.stop()
+
+
+def logout_user():
+    st.session_state["auth_user"] = None
+    st.rerun()
+
+
+def get_saved_common_ai_config(settings):
+    return settings.get("common_ai_config", {})
+
+
+def get_saved_correlation_info(settings):
+    return settings.get("correlation", {})
+
+
+def get_stored_correlation_file_path(settings, db_path):
+    stored_path = normalize_text(get_saved_correlation_info(settings).get("stored_excel_path"))
+    if not stored_path:
+        return None
+    path = Path(stored_path)
+    if not path.is_absolute():
+        path = get_app_storage_dir(db_path) / path
+    return path if path.exists() else None
+
+
+def store_correlation_excel(db_path, uploaded_excel, uploaded_by, threshold):
+    storage_dir = get_app_storage_dir(db_path)
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    suffix = Path(normalize_text(getattr(uploaded_excel, "name", "")) or ".xlsx").suffix or ".xlsx"
+    target = storage_dir / f"{CORRELATION_UPLOAD_STEM}{suffix}"
+    target.write_bytes(uploaded_excel.getvalue())
+
+    settings = load_app_settings(db_path)
+    settings["correlation"] = {
+        "stored_excel_path": str(target),
+        "original_name": normalize_text(getattr(uploaded_excel, "name", target.name)),
+        "uploaded_at": now_display(),
+        "uploaded_by": normalize_text(uploaded_by),
+        "threshold": int(threshold),
+    }
+    save_app_settings(db_path, settings)
+    return settings["correlation"]
+
+
+def correlate_patients_with_stored_excel(db_path, settings):
+    stored_path = get_stored_correlation_file_path(settings, db_path)
+    if stored_path is None:
+        raise RuntimeError("Nenhuma planilha armazenada pelo administrador.")
+
+    threshold = int(get_saved_correlation_info(settings).get("threshold", 70))
+    with open(stored_path, "rb") as fp:
+        return correlate_patients_with_excel_upload(db_path, fp, threshold)
 
 
 def ensure_schema(db_path):
@@ -1545,48 +1748,92 @@ def main():
 
     st.title("Minerador de Achados Suspeitos de Tumor")
     st.caption("Mineracao com IA + lista de pacientes minerados por especialidade no mesmo banco do dashboard.")
+    default_db_path = st.session_state.get("selected_db_path", get_db_path())
+    auth_user = render_login_screen(default_db_path)
+    is_admin = auth_user.get("role") == "admin"
 
-    db_path = st.sidebar.text_input("DB_PATH (SQLite)", value=get_db_path())
+    if is_admin:
+        db_path = st.sidebar.text_input("DB_PATH (SQLite)", value=default_db_path)
+        st.session_state["selected_db_path"] = db_path
+    else:
+        db_path = st.session_state.get("selected_db_path", get_db_path())
+        st.sidebar.text_input("DB_PATH (SQLite)", value=db_path, disabled=True)
+
+    settings = load_app_settings(db_path)
+    admin_runtime = settings.get("admin_runtime", {})
+    common_ai_config = get_saved_common_ai_config(settings)
+    correlation_info = get_saved_correlation_info(settings)
+
+    st.sidebar.caption(f"Usuario logado: {auth_user.get('username', '')} ({auth_user.get('label', '')})")
+    if st.sidebar.button("Sair", use_container_width=True):
+        logout_user()
+
     only_eligible = st.sidebar.checkbox("Mostrar somente elegiveis", value=False)
 
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Inicializar/Substituir banco")
-    uploaded_db = st.sidebar.file_uploader("Upload banco SQLite", type=["db", "sqlite", "sqlite3"], key="db_upload")
-    if uploaded_db is not None and st.sidebar.button("Salvar banco em DB_PATH"):
-        try:
-            save_uploaded_db(uploaded_db, db_path)
-            st.sidebar.success("Banco salvo com sucesso.")
-            st.cache_data.clear()
-            st.rerun()
-        except Exception as exc:
-            st.sidebar.error(str(exc))
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Correlacionar setor/convenio")
-    uploaded_corr_excel = st.sidebar.file_uploader(
-        "Upload Excel (XLS/XLSX)",
-        type=["xls", "xlsx"],
-        key="corr_excel_upload",
-    )
-    corr_threshold = st.sidebar.slider(
-        "Similaridade minima (%)",
-        min_value=60,
-        max_value=100,
-        value=70,
-        step=1,
-        key="corr_threshold_slider",
-    )
-    if st.sidebar.button("Correlacionar Excel com pacientes", use_container_width=True):
-        if uploaded_corr_excel is None:
-            st.sidebar.error("Selecione um arquivo Excel antes de correlacionar.")
-        else:
+    if is_admin:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Inicializar/Substituir banco")
+        uploaded_db = st.sidebar.file_uploader("Upload banco SQLite", type=["db", "sqlite", "sqlite3"], key="db_upload")
+        if uploaded_db is not None and st.sidebar.button("Salvar banco em DB_PATH"):
             try:
-                result = correlate_patients_with_excel_upload(db_path, uploaded_corr_excel, corr_threshold)
-                st.session_state["excel_correlation_result"] = result
+                save_uploaded_db(uploaded_db, db_path)
+                st.sidebar.success("Banco salvo com sucesso.")
                 st.cache_data.clear()
                 st.rerun()
             except Exception as exc:
-                st.sidebar.error(f"Falha na correlacao: {exc}")
+                st.sidebar.error(str(exc))
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Correlacionar setor/convenio")
+    stored_corr_path = get_stored_correlation_file_path(settings, db_path)
+    if stored_corr_path is not None:
+        st.sidebar.caption(
+            "Planilha ativa: "
+            f"{normalize_text(correlation_info.get('original_name')) or stored_corr_path.name}"
+        )
+        st.sidebar.caption(
+            "Ultima atualizacao: "
+            f"{normalize_text(correlation_info.get('uploaded_at')) or 'Nao informada'}"
+        )
+    else:
+        st.sidebar.caption("Nenhuma planilha de correlacao armazenada.")
+
+    if is_admin:
+        uploaded_corr_excel = st.sidebar.file_uploader(
+            "Upload Excel (XLS/XLSX)",
+            type=["xls", "xlsx"],
+            key="corr_excel_upload",
+        )
+        corr_threshold = st.sidebar.slider(
+            "Similaridade minima (%)",
+            min_value=60,
+            max_value=100,
+            value=int(correlation_info.get("threshold", 70)),
+            step=1,
+            key="corr_threshold_slider",
+        )
+        if st.sidebar.button("Salvar/Atualizar planilha no sistema", use_container_width=True):
+            if uploaded_corr_excel is None:
+                st.sidebar.error("Selecione um arquivo Excel antes de salvar.")
+            else:
+                try:
+                    info = store_correlation_excel(db_path, uploaded_corr_excel, auth_user.get("username", ""), corr_threshold)
+                    st.sidebar.success(
+                        "Planilha armazenada com sucesso. "
+                        f"Atualizada em {info.get('uploaded_at', '')}."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.sidebar.error(f"Falha ao armazenar planilha: {exc}")
+
+    if st.sidebar.button("Correlacionar Excel com pacientes", use_container_width=True):
+        try:
+            result = correlate_patients_with_stored_excel(db_path, settings)
+            st.session_state["excel_correlation_result"] = result
+            st.cache_data.clear()
+            st.rerun()
+        except Exception as exc:
+            st.sidebar.error(f"Falha na correlacao: {exc}")
 
     corr_result = st.session_state.get("excel_correlation_result")
     if isinstance(corr_result, dict) and corr_result.get("success"):
@@ -1606,55 +1853,154 @@ def main():
             )
         )
 
-    provider_cols = st.columns([1.0, 1.25, 1.25, 1.35, 1.15])
-    provider = provider_cols[0].selectbox("API", list(MODEL_OPTIONS.keys()), index=0)
+    configured_provider = normalize_text(common_ai_config.get("provider")) or "OpenAI"
+    if configured_provider not in MODEL_OPTIONS:
+        configured_provider = "OpenAI"
+    configured_model = normalize_text(common_ai_config.get("model")) or MODEL_OPTIONS[configured_provider][0]
+    configured_api_key = normalize_text(common_ai_config.get("api_key"))
 
-    env_key_name = PROVIDER_ENV_KEYS.get(provider, "")
-    default_api_key = os.getenv(env_key_name, "") if env_key_name else ""
-    api_key = provider_cols[3].text_input(
-        "API Key",
-        type="password",
-        value=st.session_state.get(f"api_key_{provider}", default_api_key),
-        help=f"Variavel de ambiente: {env_key_name}" if env_key_name else "Nao requer chave para uso local.",
-    )
-    st.session_state[f"api_key_{provider}"] = api_key
+    if is_admin:
+        provider_state_key = "admin_provider_selected"
+        if st.session_state.get(provider_state_key) not in MODEL_OPTIONS:
+            runtime_provider = normalize_text(admin_runtime.get("provider")) or configured_provider
+            st.session_state[provider_state_key] = runtime_provider if runtime_provider in MODEL_OPTIONS else "OpenAI"
 
-    update_models_clicked = provider_cols[4].button(
-        "Validar chave / Atualizar modelos",
-        use_container_width=True,
-    )
+        provider_cols = st.columns([1.0, 1.25, 1.25, 1.35, 1.15])
+        provider = provider_cols[0].selectbox("API", list(MODEL_OPTIONS.keys()), key=provider_state_key)
 
-    if update_models_clicked:
-        try:
-            fresh_models = fetch_models_for_provider(provider, api_key)
-            if not fresh_models:
-                raise RuntimeError("Nenhum modelo retornado para este provider.")
-            set_cached_models(provider, fresh_models)
-            st.session_state[f"model_selected_{provider}"] = fresh_models[0]
-            st.success(f"API validada. {len(fresh_models)} modelos carregados para {provider}.")
-            st.rerun()
-        except Exception as exc:
-            st.error(f"Falha ao validar chave/modelos: {exc}")
+        env_key_name = PROVIDER_ENV_KEYS.get(provider, "")
+        runtime_api_key = ""
+        if normalize_text(admin_runtime.get("provider")) == provider:
+            runtime_api_key = normalize_text(admin_runtime.get("api_key"))
+        default_api_key = runtime_api_key or (os.getenv(env_key_name, "") if env_key_name else "")
+        api_key_state_key = f"api_key_{provider}"
+        if api_key_state_key not in st.session_state:
+            st.session_state[api_key_state_key] = default_api_key
 
-    provider_models = get_cached_models(provider)
-    if not provider_models:
-        provider_models = list(MODEL_OPTIONS.get(provider, []))
+        api_key = provider_cols[3].text_input(
+            "API Key",
+            type="password",
+            value=st.session_state.get(api_key_state_key, default_api_key),
+            help=f"Variavel de ambiente: {env_key_name}" if env_key_name else "Nao requer chave para uso local.",
+        )
+        st.session_state[api_key_state_key] = api_key
 
-    model_state_key = f"model_selected_{provider}"
-    if st.session_state.get(model_state_key) not in provider_models:
-        st.session_state[model_state_key] = provider_models[0] if provider_models else ""
+        update_models_clicked = provider_cols[4].button(
+            "Validar chave / Atualizar modelos",
+            use_container_width=True,
+        )
 
-    selected_model = provider_cols[1].selectbox(
-        "Modelo",
-        provider_models,
-        key=model_state_key,
-    )
-    custom_model = provider_cols[2].text_input("Modelo custom", value="")
-    effective_model = custom_model.strip() or selected_model
+        if update_models_clicked:
+            try:
+                fresh_models = fetch_models_for_provider(provider, api_key)
+                if not fresh_models:
+                    raise RuntimeError("Nenhum modelo retornado para este provider.")
+                set_cached_models(provider, fresh_models)
+                settings["admin_runtime"]["provider"] = provider
+                settings["admin_runtime"]["api_key"] = api_key
+                settings["admin_runtime"]["validated_at"] = now_display()
+                settings["admin_runtime"].setdefault("available_models", {})
+                settings["admin_runtime"]["available_models"][provider] = fresh_models
+                save_app_settings(db_path, settings)
+                st.session_state[f"model_selected_{provider}"] = fresh_models[0]
+                st.success(f"API validada. {len(fresh_models)} modelos carregados para {provider}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Falha ao validar chave/modelos: {exc}")
 
-    st.markdown('<div class="onco-toolbar">', unsafe_allow_html=True)
-    st.markdown('<div class="onco-toolbar-title">Controles de Mineracao</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="onco-status">Status: Pronto | Provider: {provider} | Modelo: {effective_model}</div>', unsafe_allow_html=True)
+        provider_models = get_cached_models(provider)
+        if not provider_models:
+            provider_models = settings.get("admin_runtime", {}).get("available_models", {}).get(provider, [])
+        if not provider_models:
+            provider_models = list(MODEL_OPTIONS.get(provider, []))
+        if provider == configured_provider and configured_model and configured_model not in provider_models:
+            provider_models = [configured_model] + provider_models
+
+        model_state_key = f"model_selected_{provider}"
+        if st.session_state.get(model_state_key) not in provider_models:
+            st.session_state[model_state_key] = configured_model if provider == configured_provider else (provider_models[0] if provider_models else "")
+
+        selected_model = provider_cols[1].selectbox(
+            "Modelo",
+            provider_models,
+            key=model_state_key,
+        )
+        custom_model_key = f"admin_custom_model_{provider}"
+        default_custom_model = configured_model if provider == configured_provider and configured_model not in provider_models else ""
+        if custom_model_key not in st.session_state:
+            st.session_state[custom_model_key] = default_custom_model
+        custom_model = provider_cols[2].text_input("Modelo custom", value=st.session_state.get(custom_model_key, default_custom_model))
+        st.session_state[custom_model_key] = custom_model
+        effective_model = custom_model.strip() or selected_model
+
+        st.markdown('<div class="onco-toolbar">', unsafe_allow_html=True)
+        st.markdown('<div class="onco-toolbar-title">Controles de Mineracao</div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="onco-status">Status: Pronto | Provider: {provider} | Modelo: {effective_model}</div>', unsafe_allow_html=True)
+
+        configured_label = (
+            f"IA atual do usuario comum: {configured_provider} / {configured_model}"
+            if configured_model else
+            "IA do usuario comum ainda nao configurada."
+        )
+        st.info(configured_label)
+        if normalize_text(common_ai_config.get("configured_at")):
+            st.caption(
+                "Configurada por "
+                f"{normalize_text(common_ai_config.get('configured_by')) or 'admin'} em "
+                f"{normalize_text(common_ai_config.get('configured_at'))}"
+            )
+
+        if st.button("Salvar esta IA para o usuario comum", use_container_width=True):
+            try:
+                if provider != "LLM Studio" and not api_key:
+                    raise RuntimeError("Informe uma API key valida antes de salvar a configuracao.")
+
+                runtime_matches = (
+                    normalize_text(settings.get("admin_runtime", {}).get("provider")) == provider
+                    and normalize_text(settings.get("admin_runtime", {}).get("api_key")) == api_key
+                    and normalize_text(settings.get("admin_runtime", {}).get("validated_at"))
+                )
+                if not runtime_matches:
+                    fresh_models = fetch_models_for_provider(provider, api_key)
+                    if fresh_models:
+                        set_cached_models(provider, fresh_models)
+                        settings["admin_runtime"].setdefault("available_models", {})
+                        settings["admin_runtime"]["available_models"][provider] = fresh_models
+
+                settings["admin_runtime"]["provider"] = provider
+                settings["admin_runtime"]["api_key"] = api_key
+                settings["admin_runtime"]["validated_at"] = now_display()
+                settings["common_ai_config"] = {
+                    "provider": provider,
+                    "model": effective_model,
+                    "api_key": api_key,
+                    "configured_at": now_display(),
+                    "configured_by": auth_user.get("username", "admin"),
+                }
+                save_app_settings(db_path, settings)
+                st.success(f"Configuracao salva. Usuarios comuns usarao {provider} / {effective_model}.")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Falha ao salvar configuracao da IA: {exc}")
+    else:
+        provider = configured_provider
+        effective_model = configured_model
+        api_key = configured_api_key
+
+        st.markdown('<div class="onco-toolbar">', unsafe_allow_html=True)
+        st.markdown('<div class="onco-toolbar-title">Controles de Mineracao</div>', unsafe_allow_html=True)
+        st.markdown(
+            f'<div class="onco-status">Modo usuario comum | IA configurada pelo administrador: {provider} / {effective_model}</div>',
+            unsafe_allow_html=True,
+        )
+        if normalize_text(common_ai_config.get("configured_at")):
+            st.caption(
+                "Configuracao ativa desde "
+                f"{normalize_text(common_ai_config.get('configured_at'))} "
+                f"por {normalize_text(common_ai_config.get('configured_by')) or 'admin'}."
+            )
+        if provider != "LLM Studio" and not api_key:
+            st.error("A IA do usuario comum ainda nao foi configurada por um administrador.")
 
     control_cols = st.columns([1.6, 1.2, 1.2, 1.0])
     uploaded_files = control_cols[0].file_uploader(
@@ -1673,15 +2019,18 @@ def main():
 
     if test_clicked:
         try:
+            if not effective_model:
+                raise RuntimeError("Nenhum modelo configurado para teste.")
             if provider != "LLM Studio" and not api_key:
                 raise RuntimeError("API key obrigatoria para o provider selecionado.")
             parsed = test_ai_connection(provider, effective_model, api_key)
-            try:
-                refreshed = fetch_models_for_provider(provider, api_key)
-                if refreshed:
-                    set_cached_models(provider, refreshed)
-            except Exception:
-                pass
+            if is_admin:
+                try:
+                    refreshed = fetch_models_for_provider(provider, api_key)
+                    if refreshed:
+                        set_cached_models(provider, refreshed)
+                except Exception:
+                    pass
             st.success("Teste de IA concluido com sucesso.")
             st.json(parsed)
         except Exception as exc:
@@ -1692,6 +2041,8 @@ def main():
     if start_clicked:
         if not uploaded_files:
             st.warning("Selecione pelo menos um PDF.")
+        elif not effective_model:
+            st.error("Nenhum modelo de IA configurado para processamento.")
         elif provider != "LLM Studio" and not api_key:
             st.error("API key obrigatoria para o provider selecionado.")
         else:
