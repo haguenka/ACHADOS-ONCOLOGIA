@@ -1319,10 +1319,18 @@ def build_results_dataframe(df, only_eligible):
     return work[cols]
 
 
-def style_patient_table(df):
+def style_patient_table(df, selected_same=""):
     def row_style(row):
         urgency = normalize_urgency(row.get("URGENCIA", ""))
         bg = ROW_BG_BY_URGENCY.get(urgency, "#1a2230")
+        if selected_same and normalize_text(row.get("SAME")) == selected_same:
+            bg = {
+                "CRITICA": "#6f1d1b",
+                "MUITO ALTA": "#7c2d12",
+                "ALTA": "#854d0e",
+                "MODERADA": "#1d4f7a",
+                "BAIXA": "#1f5b43",
+            }.get(urgency, bg)
         styles = [f"background-color: {bg}; color: #dfe9f3;"] * len(row)
         return styles
 
@@ -1359,10 +1367,8 @@ def render_clickable_patient_table(df, table_cols, table_key):
         st.info("Sem pacientes nesta aba.")
         return
 
-    view_df = df[table_cols].copy()
+    view_df = df[table_cols].reset_index(drop=True).copy()
     selected_same = normalize_text(st.session_state.get(f"{table_key}_selected_same"))
-    view_df["DATA EXAME"] = view_df["DATA EXAME"].apply(format_exam_date)
-    view_df.insert(0, "SELECIONAR", view_df["SAME"].astype(str) == selected_same)
 
     action_cols = st.columns([1.2, 3])
     if action_cols[0].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
@@ -1374,27 +1380,43 @@ def render_clickable_patient_table(df, table_cols, table_key):
             st.rerun()
     action_cols[1].caption("Selecione a linha do paciente diretamente na tabela e abra os detalhes.")
 
-    edited_df = st.data_editor(
-        view_df,
-        use_container_width=True,
-        height=620,
-        hide_index=True,
-        disabled=table_cols,
-        num_rows="fixed",
-        column_config={
-            "SELECIONAR": st.column_config.CheckboxColumn(
-                "SEL",
-                help="Marque a linha do paciente para abrir a analise detalhada.",
-                default=False,
-            )
-        },
-    )
+    try:
+        table_event = st.dataframe(
+            style_patient_table(view_df, selected_same),
+            use_container_width=True,
+            height=620,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"{table_key}_results_table",
+        )
+        selected_rows = list(getattr(getattr(table_event, "selection", None), "rows", []) or [])
+        if selected_rows:
+            selected_same = normalize_text(view_df.iloc[selected_rows[0]]["SAME"])
+    except TypeError:
+        legacy_df = view_df.copy()
+        legacy_df["DATA EXAME"] = legacy_df["DATA EXAME"].apply(format_exam_date)
+        legacy_df.insert(0, "SELECIONAR", legacy_df["SAME"].astype(str) == selected_same)
+        edited_df = st.data_editor(
+            legacy_df,
+            use_container_width=True,
+            height=620,
+            hide_index=True,
+            disabled=table_cols,
+            num_rows="fixed",
+            column_config={
+                "SELECIONAR": st.column_config.CheckboxColumn(
+                    "SEL",
+                    help="Marque a linha do paciente para abrir a analise detalhada.",
+                    default=False,
+                )
+            },
+        )
+        selected_rows = edited_df[edited_df["SELECIONAR"]]
+        if len(selected_rows) > 1:
+            st.info("Mais de uma linha foi marcada. O sistema usara apenas a primeira.")
+        selected_same = normalize_text(selected_rows.iloc[0]["SAME"]) if not selected_rows.empty else ""
 
-    selected_rows = edited_df[edited_df["SELECIONAR"]]
-    if len(selected_rows) > 1:
-        st.info("Mais de uma linha foi marcada. O sistema usara apenas a primeira.")
-
-    selected_same = normalize_text(selected_rows.iloc[0]["SAME"]) if not selected_rows.empty else ""
     st.session_state[f"{table_key}_selected_same"] = selected_same
 
 
