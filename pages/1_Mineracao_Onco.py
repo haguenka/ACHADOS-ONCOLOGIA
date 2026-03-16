@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+from io import BytesIO
 from difflib import SequenceMatcher
 from datetime import datetime
 from pathlib import Path
@@ -1370,7 +1371,16 @@ def render_clickable_patient_table(df, table_cols, table_key):
     view_df = df[table_cols].reset_index(drop=True).copy()
     selected_same = normalize_text(st.session_state.get(f"{table_key}_selected_same"))
 
-    action_cols = st.columns([1.2, 3])
+    export_df = view_df.copy()
+    export_df["DATA EXAME"] = export_df["DATA EXAME"].apply(format_exam_date)
+    export_buffer = BytesIO()
+    with pd.ExcelWriter(export_buffer, engine="openpyxl") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="Resultados")
+    export_bytes = export_buffer.getvalue()
+    export_name = re.sub(r"[^a-z0-9_]+", "_", table_key.lower()).strip("_") or "resultados_detalhados"
+    export_filename = f"{export_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+    action_cols = st.columns([1.2, 1.2, 2.6])
     if action_cols[0].button("Abrir analise detalhada", key=f"{table_key}_open_btn", type="primary"):
         if not selected_same:
             st.warning("Selecione uma linha na tabela antes de abrir a analise detalhada.")
@@ -1378,7 +1388,15 @@ def render_clickable_patient_table(df, table_cols, table_key):
             st.session_state["detail_same_id"] = selected_same
             st.session_state["open_detail_dialog"] = True
             st.rerun()
-    action_cols[1].caption("Selecione a linha do paciente diretamente na tabela e abra os detalhes.")
+    action_cols[1].download_button(
+        "Exportar .xlsx",
+        data=export_bytes,
+        file_name=export_filename,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"{table_key}_export_xlsx_btn",
+        use_container_width=True,
+    )
+    action_cols[2].caption("Selecione a linha do paciente diretamente na tabela, abra os detalhes ou exporte a lista da aba atual.")
 
     try:
         table_event = st.dataframe(
@@ -2036,7 +2054,7 @@ def main():
         if provider != "LLM Studio" and not api_key:
             st.error("A IA do usuario comum ainda nao foi configurada por um administrador.")
 
-    control_cols = st.columns([1.6, 1.2, 1.2, 1.0])
+    control_cols = st.columns([2.2, 1.2])
     uploaded_files = control_cols[0].file_uploader(
         "Selecionar arquivos PDF",
         type=["pdf"],
@@ -2044,31 +2062,6 @@ def main():
         label_visibility="collapsed",
     )
     start_clicked = control_cols[1].button("Iniciar Processamento", use_container_width=True)
-    test_clicked = control_cols[2].button("Testar IA", use_container_width=True)
-    clear_clicked = control_cols[3].button("Limpar Cache", use_container_width=True)
-
-    if clear_clicked:
-        st.cache_data.clear()
-        st.rerun()
-
-    if test_clicked:
-        try:
-            if not effective_model:
-                raise RuntimeError("Nenhum modelo configurado para teste.")
-            if provider != "LLM Studio" and not api_key:
-                raise RuntimeError("API key obrigatoria para o provider selecionado.")
-            parsed = test_ai_connection(provider, effective_model, api_key)
-            if is_admin:
-                try:
-                    refreshed = fetch_models_for_provider(provider, api_key)
-                    if refreshed:
-                        set_cached_models(provider, refreshed)
-                except Exception:
-                    pass
-            st.success("Teste de IA concluido com sucesso.")
-            st.json(parsed)
-        except Exception as exc:
-            st.error(f"Falha no teste de IA: {exc}")
 
     run_rows = []
     run_errors = []
