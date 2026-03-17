@@ -65,6 +65,8 @@ EXCEL_NAME_CANDIDATES = ["nome", "nome_paciente", "paciente_nome_social", "pacie
 EXCEL_CONVENIO_CANDIDATES = ["convenio", "plano_convenio"]
 EXCEL_TELEFONE_CANDIDATES = ["telefone", "fone", "tel", "celular"]
 EXCEL_SETOR_CANDIDATES = ["setor", "tipo_atendimento", "setor_executante", "departamento"]
+EXCEL_ENDERECO_CANDIDATES = ["endereco", "logradouro", "rua", "endereco_paciente"]
+EXCEL_MEDICO_SOLICITANTE_CANDIDATES = ["medico_solicitante", "solicitante", "medico_requisitante", "requisitante"]
 EXCEL_SAME_CANDIDATES = ["same", "same_id", "sameid"]
 APP_SETTINGS_FILENAME = "onco_app_settings.json"
 CORRELATION_UPLOAD_STEM = "convenios_correlation_source"
@@ -370,6 +372,7 @@ def ensure_schema(db_path):
                 telefone TEXT,
                 setor TEXT,
                 endereco TEXT,
+                medico_solicitante TEXT,
                 exam_title TEXT,
                 exam_modality TEXT,
                 medical_specialty TEXT,
@@ -394,6 +397,11 @@ def ensure_schema(db_path):
             END;
             """
         )
+        cursor.execute("PRAGMA table_info(patients)")
+        existing_columns = {row[1] for row in cursor.fetchall()}
+        for column_name in ["endereco", "medico_solicitante"]:
+            if column_name not in existing_columns:
+                cursor.execute(f"ALTER TABLE patients ADD COLUMN {column_name} TEXT")
         conn.commit()
     finally:
         conn.close()
@@ -690,6 +698,8 @@ def normalize_excel_for_correlation(df_excel):
     convenio_col = pick_col(EXCEL_CONVENIO_CANDIDATES)
     telefone_col = pick_col(EXCEL_TELEFONE_CANDIDATES)
     setor_col = pick_col(EXCEL_SETOR_CANDIDATES)
+    endereco_col = pick_col(EXCEL_ENDERECO_CANDIDATES)
+    medico_solicitante_col = pick_col(EXCEL_MEDICO_SOLICITANTE_CANDIDATES)
     same_col = pick_col(EXCEL_SAME_CANDIDATES)
 
     if not name_col:
@@ -698,9 +708,9 @@ def normalize_excel_for_correlation(df_excel):
             + ", ".join(EXCEL_NAME_CANDIDATES)
         )
 
-    if not convenio_col and not telefone_col and not setor_col:
+    if not convenio_col and not telefone_col and not setor_col and not endereco_col and not medico_solicitante_col:
         raise RuntimeError(
-            "Nenhuma coluna de convenio/telefone/setor encontrada no Excel."
+            "Nenhuma coluna de convenio/telefone/setor/endereco/medico_solicitante encontrada no Excel."
         )
 
     work["nome"] = work[name_col]
@@ -711,6 +721,8 @@ def normalize_excel_for_correlation(df_excel):
         work.loc[fallback_mask, "convenio"] = work.loc[fallback_mask, "plano_convenio"]
     work["telefone"] = work[telefone_col] if telefone_col else None
     work["setor"] = work[setor_col] if setor_col else None
+    work["endereco"] = work[endereco_col] if endereco_col else None
+    work["medico_solicitante"] = work[medico_solicitante_col] if medico_solicitante_col else None
     work["same"] = work[same_col] if same_col else None
 
     work["nome_norm"] = work["nome"].apply(normalize_name_for_match)
@@ -729,7 +741,12 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
     conn = sqlite3.connect(db_path)
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT same_id, patient_name, convenio, telefone, setor FROM patients")
+        cursor.execute(
+            """
+            SELECT same_id, patient_name, convenio, telefone, setor, endereco, medico_solicitante
+            FROM patients
+            """
+        )
         patients = cursor.fetchall()
 
         total_patients = len(patients)
@@ -741,7 +758,13 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
                 "updated_patients": 0,
                 "unmatched_patients": 0,
                 "match_rate": 0.0,
-                "updated_counts": {"convenio": 0, "telefone": 0, "setor": 0},
+                "updated_counts": {
+                    "convenio": 0,
+                    "telefone": 0,
+                    "setor": 0,
+                    "endereco": 0,
+                    "medico_solicitante": 0,
+                },
             }
 
         same_index_map = {}
@@ -753,9 +776,23 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
         matched_patients = 0
         updated_patients = 0
         unmatched_patients = 0
-        updated_counts = {"convenio": 0, "telefone": 0, "setor": 0}
+        updated_counts = {
+            "convenio": 0,
+            "telefone": 0,
+            "setor": 0,
+            "endereco": 0,
+            "medico_solicitante": 0,
+        }
 
-        for same_id, patient_name, current_convenio, current_telefone, current_setor in patients:
+        for (
+            same_id,
+            patient_name,
+            current_convenio,
+            current_telefone,
+            current_setor,
+            current_endereco,
+            current_medico_solicitante,
+        ) in patients:
             if not normalize_text(patient_name):
                 unmatched_patients += 1
                 continue
@@ -779,6 +816,8 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
             excel_convenio = normalize_text(excel_row.get("convenio"))
             excel_telefone = normalize_text(excel_row.get("telefone"))
             excel_setor = normalize_text(excel_row.get("setor"))
+            excel_endereco = normalize_text(excel_row.get("endereco"))
+            excel_medico_solicitante = normalize_text(excel_row.get("medico_solicitante"))
 
             update_fields = {}
             if excel_convenio and normalize_text(current_convenio) != excel_convenio:
@@ -790,6 +829,15 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
             if excel_setor and normalize_text(current_setor) != excel_setor:
                 update_fields["setor"] = excel_setor
                 updated_counts["setor"] += 1
+            if excel_endereco and normalize_text(current_endereco) != excel_endereco:
+                update_fields["endereco"] = excel_endereco
+                updated_counts["endereco"] += 1
+            if (
+                excel_medico_solicitante
+                and normalize_text(current_medico_solicitante) != excel_medico_solicitante
+            ):
+                update_fields["medico_solicitante"] = excel_medico_solicitante
+                updated_counts["medico_solicitante"] += 1
 
             if not update_fields:
                 continue
@@ -1901,7 +1949,9 @@ def main():
             (
                 f"Campos atualizados -> convenio: {int(updated_counts.get('convenio', 0))}, "
                 f"telefone: {int(updated_counts.get('telefone', 0))}, "
-                f"setor: {int(updated_counts.get('setor', 0))}"
+                f"setor: {int(updated_counts.get('setor', 0))}, "
+                f"endereco: {int(updated_counts.get('endereco', 0))}, "
+                f"medico_solicitante: {int(updated_counts.get('medico_solicitante', 0))}"
             )
         )
 
