@@ -66,7 +66,13 @@ EXCEL_CONVENIO_CANDIDATES = ["convenio", "plano_convenio"]
 EXCEL_TELEFONE_CANDIDATES = ["telefone", "fone", "tel", "celular"]
 EXCEL_SETOR_CANDIDATES = ["setor", "tipo_atendimento", "setor_executante", "departamento"]
 EXCEL_ENDERECO_CANDIDATES = ["endereco", "logradouro", "rua", "endereco_paciente"]
-EXCEL_MEDICO_SOLICITANTE_CANDIDATES = ["medico_solicitante", "solicitante", "medico_requisitante", "requisitante"]
+EXCEL_MEDICO_SOLICITANTE_CANDIDATES = [
+    "medico_solicitante",
+    "medico_assistente",
+    "solicitante",
+    "medico_requisitante",
+    "requisitante",
+]
 EXCEL_SAME_CANDIDATES = ["same", "same_id", "sameid"]
 APP_SETTINGS_FILENAME = "onco_app_settings.json"
 CORRELATION_UPLOAD_STEM = "convenios_correlation_source"
@@ -1286,6 +1292,8 @@ def load_patients_from_db(db_path, mtime_token):
                 urgency_reason,
                 convenio,
                 setor,
+                endereco,
+                medico_solicitante,
                 last_file,
                 context,
                 updated_at
@@ -1310,6 +1318,8 @@ def build_results_dataframe(df, only_eligible):
                 "MODALIDADE",
                 "CONVENIO",
                 "SETOR",
+                "ENDERECO",
+                "MEDICO ASSISTENTE",
                 "ESPECIALIDADE",
                 "MODELO IA",
             ]
@@ -1330,6 +1340,8 @@ def build_results_dataframe(df, only_eligible):
     work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
     work["CONVENIO"] = work["convenio"].fillna("").astype(str)
     work["SETOR"] = work["setor"].fillna("").astype(str)
+    work["ENDERECO"] = work["endereco"].fillna("").astype(str)
+    work["MEDICO ASSISTENTE"] = work["medico_solicitante"].fillna("").astype(str)
     work["ESPECIALIDADE"] = work.apply(
         lambda r: canonical_specialty(
             r.get("medical_specialty", ""),
@@ -1350,6 +1362,8 @@ def build_results_dataframe(df, only_eligible):
         "MODALIDADE",
         "CONVENIO",
         "SETOR",
+        "ENDERECO",
+        "MEDICO ASSISTENTE",
         "ESPECIALIDADE",
         "MODELO IA",
         "same_id",
@@ -1361,6 +1375,8 @@ def build_results_dataframe(df, only_eligible):
         "urgency_reason",
         "convenio",
         "setor",
+        "endereco",
+        "medico_solicitante",
         "last_file",
         "context",
         "updated_at",
@@ -1394,7 +1410,19 @@ def render_specialty_tabs(df):
         st.info("Nenhum paciente minerado ainda.")
         return
 
-    table_cols = ["URGENCIA", "SCORE MALIG.", "SAME", "NOME", "IDADE", "DATA EXAME", "MODALIDADE", "CONVENIO", "SETOR"]
+    table_cols = [
+        "URGENCIA",
+        "SCORE MALIG.",
+        "SAME",
+        "NOME",
+        "IDADE",
+        "DATA EXAME",
+        "MODALIDADE",
+        "CONVENIO",
+        "SETOR",
+        "ENDERECO",
+        "MEDICO ASSISTENTE",
+    ]
     specialty_counts = df["ESPECIALIDADE"].value_counts().to_dict()
     ordered_specialties = [name for name in SPECIALTY_BUCKETS if specialty_counts.get(name, 0) > 0]
 
