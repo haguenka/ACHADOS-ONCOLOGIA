@@ -131,6 +131,11 @@ def specialty_chip(name):
 def normalize_text(value):
     if value is None:
         return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
     return str(value).strip()
 
 
@@ -141,6 +146,31 @@ def esc(value):
 def ascii_fold(value):
     text = normalize_text(value)
     return "".join(ch for ch in unicodedata.normalize("NFKD", text) if not unicodedata.combining(ch))
+
+
+def split_patient_name_parts(value):
+    return re.findall(r"[A-Za-zÀ-ÿ]+", normalize_text(value), flags=re.UNICODE)
+
+
+def patient_name_to_initials(value):
+    initials = []
+    for part in split_patient_name_parts(value):
+        folded = ascii_fold(part)
+        if folded:
+            initials.append(folded[0].upper())
+    return " ".join(initials)
+
+
+def is_initials_only_name(value):
+    parts = split_patient_name_parts(value)
+    if not parts:
+        return False
+    return all(len(ascii_fold(part)) == 1 for part in parts if ascii_fold(part))
+
+
+def mask_patient_name(value):
+    masked = patient_name_to_initials(value)
+    return masked or normalize_text(value)
 
 
 def get_db_path():
@@ -413,6 +443,33 @@ def ensure_schema(db_path):
         conn.close()
 
 
+def anonymize_patient_names_in_db(db_path):
+    if not db_path or not os.path.exists(db_path):
+        return 0
+
+    ensure_schema(db_path)
+    conn = sqlite3.connect(db_path)
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT same_id, patient_name FROM patients")
+        rows = cursor.fetchall()
+        updates = []
+        for same_id, patient_name in rows:
+            masked_name = mask_patient_name(patient_name)
+            if masked_name and normalize_text(patient_name) != masked_name:
+                updates.append((masked_name, same_id))
+
+        if updates:
+            cursor.executemany(
+                "UPDATE patients SET patient_name = ? WHERE same_id = ?",
+                updates,
+            )
+            conn.commit()
+        return len(updates)
+    finally:
+        conn.close()
+
+
 def get_pdf_reader_class():
     try:
         from pypdf import PdfReader
@@ -464,6 +521,17 @@ def parse_patient_name_fallback(text):
             if len(name) >= 3:
                 return name.title()
     return "Paciente nao identificado"
+
+
+def resolve_patient_name_for_match(patient_name, full_text):
+    normalized_name = normalize_text(patient_name)
+    if normalized_name and not is_initials_only_name(normalized_name):
+        return normalized_name
+
+    parsed_name = parse_patient_name_fallback(full_text)
+    if normalize_text(parsed_name).lower() != "paciente nao identificado":
+        return parsed_name
+    return normalized_name
 
 
 def parse_exam_date_fallback(text):
@@ -749,7 +817,7 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT same_id, patient_name, convenio, telefone, setor, endereco, medico_solicitante
+            SELECT same_id, patient_name, full_text, convenio, telefone, setor, endereco, medico_solicitante
             FROM patients
             """
         )
@@ -793,6 +861,7 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
         for (
             same_id,
             patient_name,
+            full_text,
             current_convenio,
             current_telefone,
             current_setor,
@@ -809,7 +878,8 @@ def correlate_patients_with_excel_upload(db_path, uploaded_excel, threshold=70):
             if same_norm and same_norm in same_index_map:
                 best_idx = same_index_map[same_norm]
             else:
-                name_match = find_best_name_match(patient_name, excel_names_normalized, threshold)
+                match_name = resolve_patient_name_for_match(patient_name, full_text)
+                name_match = find_best_name_match(match_name, excel_names_normalized, threshold)
                 if name_match is not None:
                     best_idx, _ = name_match
 
@@ -1106,7 +1176,9 @@ def build_ai_analysis_from_payload(payload):
 
 def normalize_ai_payload(ai_dict, source_text, file_name, provider, model):
     same_id = normalize_text(ai_dict.get("same_id")) or parse_same_id_fallback(source_text)
-    patient_name = normalize_text(ai_dict.get("patient_name")) or parse_patient_name_fallback(source_text)
+    patient_name = mask_patient_name(
+        normalize_text(ai_dict.get("patient_name")) or parse_patient_name_fallback(source_text)
+    )
     age = normalize_text(ai_dict.get("age")) or parse_age_fallback(source_text)
     last_exam_date = format_exam_date(
         normalize_text(ai_dict.get("last_exam_date")) or parse_exam_date_fallback(source_text)
@@ -1334,7 +1406,7 @@ def build_results_dataframe(df, only_eligible):
     work["SCORE_NUM"] = work["malignancy_score"].apply(normalize_score)
     work["SCORE MALIG."] = work["SCORE_NUM"].apply(lambda x: f"{x}/5")
     work["SAME"] = work["same_id"].fillna("").astype(str)
-    work["NOME"] = work["patient_name"].fillna("").astype(str)
+    work["NOME"] = work["patient_name"].apply(mask_patient_name)
     work["IDADE"] = work["age"].fillna("").astype(str)
     work["DATA EXAME"] = work["last_exam_date"].apply(parse_exam_datetime)
     work["MODALIDADE"] = work["exam_modality"].fillna("").astype(str)
@@ -1905,7 +1977,11 @@ def main():
         if uploaded_db is not None and st.sidebar.button("Salvar banco em DB_PATH"):
             try:
                 save_uploaded_db(uploaded_db, db_path)
-                st.sidebar.success("Banco salvo com sucesso.")
+                anonymized_count = anonymize_patient_names_in_db(db_path)
+                message = "Banco salvo com sucesso."
+                if anonymized_count:
+                    message += f" Nomes anonimizados: {anonymized_count}."
+                st.sidebar.success(message)
                 st.cache_data.clear()
                 st.rerun()
             except Exception as exc:
@@ -2197,6 +2273,13 @@ def main():
 
     try:
         mtime = os.path.getmtime(db_path)
+        db_signature = f"{Path(db_path).resolve()}::{mtime}"
+        if st.session_state.get("lgpd_name_signature") != db_signature:
+            anonymized_count = anonymize_patient_names_in_db(db_path)
+            if anonymized_count:
+                st.cache_data.clear()
+                mtime = os.path.getmtime(db_path)
+            st.session_state["lgpd_name_signature"] = f"{Path(db_path).resolve()}::{mtime}"
         raw_df = load_patients_from_db(db_path, mtime)
     except Exception as exc:
         st.error(f"Erro ao ler banco: {exc}")
