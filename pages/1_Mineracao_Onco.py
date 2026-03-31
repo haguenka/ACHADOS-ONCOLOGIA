@@ -451,17 +451,47 @@ def anonymize_patient_names_in_db(db_path):
     conn = sqlite3.connect(db_path)
     try:
         cursor = conn.cursor()
-        cursor.execute("SELECT same_id, patient_name FROM patients")
+        cursor.execute("SELECT same_id, patient_name, full_text, context FROM patients")
         rows = cursor.fetchall()
         updates = []
-        for same_id, patient_name in rows:
+        for same_id, patient_name, full_text, context in rows:
             masked_name = mask_patient_name(patient_name)
-            if masked_name and normalize_text(patient_name) != masked_name:
-                updates.append((masked_name, same_id))
+            sanitized_full_text, lgpd_meta = sanitize_report_text_for_ai(full_text)
+            context_payload = {}
+            try:
+                context_payload = json.loads(normalize_text(context) or "{}")
+            except Exception:
+                context_payload = {}
+            context_payload["lgpd_mode"] = "initials_only"
+            context_payload["same_primary_identifier"] = True
+            context_payload["sanitized_before_ai"] = True
+            context_payload["patient_initials"] = normalize_text(lgpd_meta.get("patient_initials")) or masked_name
+            context_payload["lgpd_updated_at"] = normalize_text(context_payload.get("lgpd_updated_at")) or datetime.utcnow().isoformat()
+            serialized_context = json.dumps(context_payload, ensure_ascii=True, sort_keys=True)
+            previous_context = ""
+            try:
+                previous_context = json.dumps(json.loads(normalize_text(context) or "{}"), ensure_ascii=True, sort_keys=True)
+            except Exception:
+                previous_context = normalize_text(context)
+
+            needs_update = (
+                (masked_name and normalize_text(patient_name) != masked_name)
+                or normalize_text(full_text) != normalize_text(sanitized_full_text)
+                or previous_context != serialized_context
+            )
+            if needs_update:
+                updates.append(
+                    (
+                        masked_name or normalize_text(patient_name),
+                        sanitized_full_text,
+                        serialized_context,
+                        same_id,
+                    )
+                )
 
         if updates:
             cursor.executemany(
-                "UPDATE patients SET patient_name = ? WHERE same_id = ?",
+                "UPDATE patients SET patient_name = ?, full_text = ?, context = ? WHERE same_id = ?",
                 updates,
             )
             conn.commit()
@@ -521,6 +551,125 @@ def parse_patient_name_fallback(text):
             if len(name) >= 3:
                 return name.title()
     return "Paciente nao identificado"
+
+
+def clean_patient_name_candidate(value):
+    text = re.sub(r"\s+", " ", normalize_text(value)).strip(" -:;/,")
+    if not text:
+        return ""
+
+    upper_text = ascii_fold(text).upper()
+    stop_tokens = [
+        " SAME",
+        " IDADE",
+        " DATA",
+        " SEXO",
+        " EXAME",
+        " MODALIDADE",
+        " PROCEDIMENTO",
+        " NASC",
+        " CONVENIO",
+        " MEDICO",
+        " SOLICITANTE",
+    ]
+    cut_pos = len(text)
+    for token in stop_tokens:
+        idx = upper_text.find(token)
+        if idx > 0:
+            cut_pos = min(cut_pos, idx)
+    return text[:cut_pos].strip(" -:;/,")
+
+
+def extract_patient_name_candidates(text):
+    candidates = []
+    seen = set()
+
+    def add_candidate(value):
+        candidate = clean_patient_name_candidate(value)
+        parts = split_patient_name_parts(candidate)
+        if len(parts) < 2:
+            return
+        key = normalize_name_for_match(candidate)
+        if not key or key in seen:
+            return
+        seen.add(key)
+        candidates.append(candidate)
+
+    patterns = [
+        r"(?im)^\s*(?:PACIENTE|NOME(?: DO PACIENTE)?|NOME DO CLIENTE)\s*[:\-]\s*([^\n\r]+)",
+        r"(?im)\b(?:PACIENTE|NOME(?: DO PACIENTE)?|NOME DO CLIENTE)\s*[:\-]\s*([^\n\r]+)",
+    ]
+    for pattern in patterns:
+        for match in re.finditer(pattern, normalize_text(text)):
+            add_candidate(match.group(1))
+
+    fallback_name = normalize_text(parse_patient_name_fallback(text))
+    if fallback_name.lower() != "paciente nao identificado":
+        add_candidate(fallback_name)
+
+    return candidates
+
+
+def sanitize_report_text_for_ai(text):
+    sanitized_text = normalize_text(text)
+    detected_candidates = extract_patient_name_candidates(sanitized_text)
+    total_replacements = 0
+    patient_initials = ""
+
+    label_pattern = re.compile(
+        r"(?im)(^\s*(?:PACIENTE|NOME(?: DO PACIENTE)?|NOME DO CLIENTE)\s*[:\-]\s*)([^\n\r]+)"
+    )
+
+    def replace_label_line(match):
+        nonlocal total_replacements, patient_initials
+        raw_value = normalize_text(match.group(2))
+        candidate = clean_patient_name_candidate(raw_value)
+        masked_name = mask_patient_name(candidate)
+        if not masked_name or masked_name == candidate:
+            return match.group(0)
+        if not patient_initials:
+            patient_initials = masked_name
+        replaced_value, replacements = re.subn(
+            re.escape(candidate),
+            masked_name,
+            raw_value,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+        if replacements == 0:
+            replaced_value = masked_name
+            replacements = 1
+        total_replacements += replacements
+        return match.group(1) + replaced_value
+
+    sanitized_text = label_pattern.sub(replace_label_line, sanitized_text)
+
+    for raw_name in sorted(detected_candidates, key=len, reverse=True):
+        masked_name = mask_patient_name(raw_name)
+        if not masked_name:
+            continue
+        if not patient_initials:
+            patient_initials = masked_name
+        sanitized_text, replacements = re.subn(
+            re.escape(raw_name),
+            masked_name,
+            sanitized_text,
+            flags=re.IGNORECASE,
+        )
+        total_replacements += replacements
+
+    if not patient_initials:
+        fallback_name = normalize_text(parse_patient_name_fallback(sanitized_text))
+        if fallback_name.lower() != "paciente nao identificado":
+            patient_initials = mask_patient_name(fallback_name)
+
+    return sanitized_text, {
+        "detected_patient_names": len(detected_candidates),
+        "patient_initials": patient_initials,
+        "replacements": total_replacements,
+        "sanitized_before_ai": True,
+        "identifier_priority": "SAME",
+    }
 
 
 def resolve_patient_name_for_match(patient_name, full_text):
@@ -1055,7 +1204,10 @@ def ai_system_prompt():
         "Neurologia, Cabeca e pescoco, Torax, Abdome e pelve / urologia (medicina interna), "
         "Ginecologico (utero/ovarios), Mama (mamas e axilas), Obstetrico, Musculoesqueletico. "
         "Regras: malignancy_score deve ser inteiro 0-5; urgency_level deve ser CRITICA, MUITO ALTA, ALTA, MODERADA ou BAIXA; "
-        "is_eligible deve ser booleano. Se dado ausente, use string vazia."
+        "is_eligible deve ser booleano. "
+        "O SAME e o identificador principal do paciente. "
+        "patient_name deve conter SOMENTE as iniciais do paciente, nunca o nome completo. "
+        "Se dado ausente, use string vazia."
     )
 
 
@@ -1174,7 +1326,7 @@ def build_ai_analysis_from_payload(payload):
     )
 
 
-def normalize_ai_payload(ai_dict, source_text, file_name, provider, model):
+def normalize_ai_payload(ai_dict, source_text, file_name, provider, model, lgpd_meta=None):
     same_id = normalize_text(ai_dict.get("same_id")) or parse_same_id_fallback(source_text)
     patient_name = mask_patient_name(
         normalize_text(ai_dict.get("patient_name")) or parse_patient_name_fallback(source_text)
@@ -1209,6 +1361,11 @@ def normalize_ai_payload(ai_dict, source_text, file_name, provider, model):
                 "provider": provider,
                 "model": model,
                 "processed_at": datetime.utcnow().isoformat(),
+                "lgpd_mode": "initials_only",
+                "same_primary_identifier": True,
+                "sanitized_before_ai": True,
+                "patient_initials": normalize_text((lgpd_meta or {}).get("patient_initials")) or patient_name,
+                "lgpd_name_replacements": int((lgpd_meta or {}).get("replacements", 0)),
             },
             ensure_ascii=True,
         ),
@@ -1292,16 +1449,17 @@ def upsert_patient(db_path, data):
 
 
 def process_pdf_with_ai(uploaded_file, db_path, provider, model, api_key):
-    report_text = extract_pdf_text(uploaded_file)
-    if not report_text:
+    raw_report_text = extract_pdf_text(uploaded_file)
+    if not raw_report_text:
         raise RuntimeError("PDF sem texto extraivel.")
 
+    report_text, lgpd_meta = sanitize_report_text_for_ai(raw_report_text)
     raw_ai = call_ai(provider, model, api_key, report_text)
     ai_dict = extract_json_block(raw_ai)
     if not isinstance(ai_dict, dict):
         raise RuntimeError(f"IA retornou formato invalido: {raw_ai[:500]}")
 
-    payload = normalize_ai_payload(ai_dict, report_text, uploaded_file.name, provider, model)
+    payload = normalize_ai_payload(ai_dict, report_text, uploaded_file.name, provider, model, lgpd_meta)
     upsert_patient(db_path, payload)
 
     return {
@@ -1314,6 +1472,7 @@ def process_pdf_with_ai(uploaded_file, db_path, provider, model, api_key):
         "modalidade": payload["exam_modality"],
         "especialidade": payload["medical_specialty"],
         "modelo_ia": payload["ai_model"],
+        "lgpd_ia": "Iniciais + SAME",
         "elegivel": "sim" if payload["is_eligible"] else "nao",
     }
 
@@ -1656,6 +1815,14 @@ def show_patient_detail_dialog(row):
     caracteristicas = extract_caracteristicas(row) or "Nao informado."
     urgency_reason = normalize_text(row.get("urgency_reason")) or "Nao informado."
     model_ia = normalize_text(row.get("MODELO IA")) or "Nao informado."
+    context_payload = {}
+    try:
+        context_payload = json.loads(normalize_text(row.get("context")) or "{}")
+    except Exception:
+        context_payload = {}
+    lgpd_label = "Ativo | IA recebe apenas iniciais + SAME"
+    if not context_payload.get("sanitized_before_ai"):
+        lgpd_label = "Sem marcacao LGPD no contexto"
 
     top_cols = st.columns([6.2, 1.4])
     with top_cols[0]:
@@ -1693,6 +1860,7 @@ def show_patient_detail_dialog(row):
     tab_ai, tab_full, tab_details = st.tabs(["Analise IA", "Texto Completo", "Detalhes"])
 
     with tab_ai:
+        st.caption(lgpd_label)
         st.markdown(
             f"""
             <div class="detail-main-panel">
@@ -1729,6 +1897,7 @@ def show_patient_detail_dialog(row):
         )
 
     with tab_full:
+        st.caption("Texto salvo e enviado para a IA ja anonimizado em iniciais.")
         st.text_area(
             "Texto completo do laudo",
             value=normalize_text(row.get("full_text")) or "Sem texto completo salvo.",
@@ -1746,6 +1915,7 @@ def show_patient_detail_dialog(row):
                 {"Campo": "Localizacao", "Valor": normalize_text(row.get("tumor_location"))},
                 {"Campo": "Caracteristicas", "Valor": normalize_text(row.get("tumor_characteristics"))},
                 {"Campo": "Motivo urgencia", "Valor": normalize_text(row.get("urgency_reason"))},
+                {"Campo": "LGPD IA", "Valor": lgpd_label},
                 {"Campo": "Arquivo", "Valor": normalize_text(row.get("last_file"))},
                 {"Campo": "Atualizado em", "Valor": normalize_text(row.get("updated_at"))},
             ]
@@ -2208,6 +2378,8 @@ def main():
         if provider != "LLM Studio" and not api_key:
             st.error("A IA do usuario comum ainda nao foi configurada por um administrador.")
 
+    st.info("LGPD ativo: antes do envio para a IA, o texto do PDF e anonimizado para manter apenas as iniciais do paciente. O SAME permanece como identificador principal.")
+
     control_cols = st.columns([2.2, 1.2])
     uploaded_files = control_cols[0].file_uploader(
         "Selecionar arquivos PDF",
@@ -2253,6 +2425,7 @@ def main():
         if "data_exame" in run_df.columns:
             run_df["data_exame"] = run_df["data_exame"].apply(format_exam_date)
         st.dataframe(run_df, use_container_width=True, hide_index=True)
+        st.caption("Coluna LGPD IA confirma que o laudo enviado ao modelo foi anonimizado com iniciais e SAME.")
         st.download_button(
             "Exportar resultados da execucao (CSV)",
             run_df.to_csv(index=False).encode("utf-8"),
